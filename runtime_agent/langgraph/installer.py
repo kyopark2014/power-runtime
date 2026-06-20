@@ -320,6 +320,7 @@ def create_bedrock_agentcore_policy(config):
                 "Resource": [
                     f"arn:aws:secretsmanager:{region}:*:secret:{projectName}/cognito/credentials*",
                     f"arn:aws:secretsmanager:{region}:*:secret:{projectName}/credentials*",
+                    f"arn:aws:secretsmanager:{region}:*:secret:tavilyapikey-{projectName}*",
                 ]
             },
             {
