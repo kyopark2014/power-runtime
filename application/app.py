@@ -71,7 +71,7 @@ with st.sidebar:
     
     st.markdown(
         "Amazon의 AgentCore을 이용해 Agent를 구현합니다." 
-        "상세한 코드는 [Github](https://github.com/kyopark2014/langgraph-runtime)을 참조하세요."
+        "상세한 코드는 [Github](https://github.com/kyopark2014/power-runtime)을 참조하세요."
     )
 
     st.subheader("🐱 대화 형태")
