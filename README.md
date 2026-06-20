@@ -1,4 +1,4 @@
-# Power Runtime: LangGraph Agent의 AgentCore 배포 및 활용
+# Power Agent의 AgentCore 배포 및 활용
 
 여기에서는 Streamlit app은 Amazon ECS에 배포하고, Agent는 AgentCore Runtime을 활용해 배포합니다. 
 
