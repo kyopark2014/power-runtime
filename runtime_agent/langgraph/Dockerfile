@@ -1,0 +1,37 @@
+FROM --platform=linux/arm64 python:3.13-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install boto3 botocore --upgrade
+RUN pip install langchain_aws langchain langchain_community langgraph langchain-openai "openai>=2.41.0" aws-bedrock-token-generator
+RUN pip install langgraph-checkpoint-sqlite aiosqlite
+RUN pip install mcp langchain-mcp-adapters
+RUN pip install bedrock-agentcore uv
+RUN pip install Pillow pytz tavily-python langchain-text-splitters
+RUN pip install requests beautifulsoup4
+RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml
+
+# Skills that use docx-js / pptxgenjs via bash/node (local install for require())
+RUN npm install docx pptxgenjs
+ENV NODE_PATH=/app/node_modules
+
+# OpenTelemetry
+RUN pip install aws-opentelemetry-distro>=0.10.0
+
+COPY . .
+
+# Add the current directory to Python path
+ENV PYTHONPATH=/app
+# Minimal config (MCP/LangGraph agent without full RAG keys in config.json)
+ENV ALLOW_MISSING_RAG_CONFIG=1
+ENV SESSION_STORAGE_DIR=/mnt/workspace
+
+EXPOSE 8080
+
+CMD ["uv", "run", "opentelemetry-instrument", "uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8080"]
