@@ -645,7 +645,7 @@ AgentCore Runtime에서 대화 history를 유지하려면 **managed session stor
 
 ```text
 sudo yum install python3 python3-pip git 
-pip install boto3 
+pip install boto3 --upgrade
 ```
 
 4. 아래 명령어로 docker를 설치합니다.
