@@ -753,6 +753,216 @@ Human(Q2) → AI(A2) → Human(Q3) → AI(tool_calls) → ToolMessage → AI(A3)
 - trim은 LLM 컨텍스트 윈도우 관리용이며, 저장된 history를 삭제하지 않습니다.
 - CloudWatch 로그에서 `trimmed messages from X to Y (max_turns=5)`로 trim 여부를 확인할 수 있습니다.
 
+
+
+## AWS Tavily 설치 및 활용
+
+[AWS Marketplace의 Tavily MCP Server](https://aws.amazon.com/marketplace/pp/prodview-twjga5bwmoszq)를 Bedrock AgentCore Runtime에 배포하고, LangGraph Agent에서 **원격 MCP(streamable HTTP)** 로 연동하는 기능입니다. 로컬 stdio 방식의 `tavily`(`mcp_server_tavily.py`)와 달리, `aws-tavily`는 **별도 AgentCore Runtime**에서 Marketplace 컨테이너를 실행합니다.
+
+### `tavily` vs `aws-tavily`
+
+| 항목 | `tavily` | `aws-tavily` |
+|------|----------|--------------|
+| 실행 위치 | LangGraph Agent Runtime 컨테이너 내부 (stdio subprocess) | 별도 AgentCore Runtime (`agent_runtime_aws_tavily`) |
+| 이미지 | `mcp_server_tavily.py` | Marketplace 사전 빌드 ECR 이미지 |
+| 연결 방식 | `command` / `args` | `streamable_http` + SigV4 |
+| 리전 | Agent Runtime과 동일 | **`us-east-1` 고정** |
+
+UI의 MCP 체크박스(`application/mcp.list`, `runtime_agent/langgraph/mcp.list`)에 `aws-tavily`가 포함되어 있으며, Agent 모드에서 선택하면 Runtime이 Tavily MCP에 연결합니다.
+
+### 사전 준비
+
+1. [Tavily MCP Server](https://aws.amazon.com/marketplace/pp/prodview-twjga5bwmoszq) Marketplace 구독
+2. Tavily API Key 확보
+3. AWS CLI credential 및 Bedrock AgentCore 사용 권한
+
+### 설치
+
+[runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)의 `main()`은 LangGraph Agent Runtime 배포 후 **aws-tavily 전용 Runtime**을 추가로 생성·갱신합니다.
+
+```text
+...
+4. Creating/updating AgentCore runtime          ← LangGraph Agent
+5. Creating/updating aws-tavily AgentCore runtime  ← Tavily MCP (Marketplace 컨테이너)
+```
+
+**컨테이너 이미지** (기본값, `config.json`의 `tavily_container_image_uri`로 override 가능):
+
+```text
+709825985650.dkr.ecr.us-east-1.amazonaws.com/tavily/tavily-mcp:v0.1.2
+```
+
+**Runtime 이름·리전 고정 (교차 프로젝트 재활용)**
+
+| 항목 | 값 |
+|------|-----|
+| Runtime 이름 | `agent_runtime_aws_tavily` |
+| 리전 | `us-east-1` |
+
+`aws-tavily` 전용 [aws-tavily](https://github.com/kyopark2014/aws-tavily) 저장소나 다른 프로젝트에서 이미 동일 이름의 Runtime을 배포했다면, installer는 새로 만들지 않고 **기존 Runtime을 찾아 update** 합니다. 설치 완료 후 ARN은 `runtime_agent/langgraph/config.json`의 `aws_tavily_agent_runtime_arn`에 저장됩니다.
+
+**Tavily API Key 설정** (`installer.py`의 `_load_tavily_api_key_for_runtime`)
+
+다음 순서로 API Key를 조회해 Runtime 환경 변수 `TAVILY_API_KEY`로 주입합니다.
+
+1. `config.json`의 `tavily_api_key`
+2. 환경 변수 `TAVILY_API_KEY`
+3. Secrets Manager (`tavilyapikey-{knowledge_base_name}` 또는 `tavilyapikey-{projectName}`)
+
+API Key가 없으면 Runtime은 생성되지만 Tavily 검색은 동작하지 않습니다.
+
+```mermaid
+flowchart TD
+  A[installer.py] --> B{agent_runtime_aws_tavily 존재?}
+  B -->|없음| C[create_agent_runtime in us-east-1]
+  B -->|있음| D[update_agent_runtime]
+  C --> E[aws_tavily_agent_runtime_arn → config.json]
+  D --> E
+  F[LangGraph Agent] -->|aws-tavily 선택| G[mcp_config.py ARN 조회]
+  G --> H[streamable_http + SigV4]
+  H --> I[Tavily MCP Runtime]
+```
+
+### MCP 연동 (`mcp_config.py`)
+
+`aws-tavily` 선택 시 [runtime_agent/langgraph/mcp_config.py](./runtime_agent/langgraph/mcp_config.py)는 `us-east-1`에서 `agent_runtime_aws_tavily` ARN을 조회하고, streamable HTTP MCP 설정을 생성합니다.
+
+```python
+AWS_TAVILY_RUNTIME_NAME = "agent_runtime_aws_tavily"
+AWS_TAVILY_RUNTIME_REGION = "us-east-1"
+
+# get_agent_runtime_arn("aws-tavily") → us-east-1에서 고정 이름 조회
+
+{
+    "mcpServers": {
+        "tavily-search": {
+            "type": "streamable_http",
+            "url": mcp_url,
+            "auth_type": "aws_sigv4",
+            "auth_region": "us-east-1",
+            "auth_service": "bedrock-agentcore",
+        }
+    }
+}
+```
+
+Runtime이 없으면 MCP 서버를 건너뛰고 로그에 skip 메시지를 남깁니다.
+
+### SigV4 인증 (`langgraph_agent.py`)
+
+[runtime_agent/langgraph/langgraph_agent.py](./runtime_agent/langgraph/langgraph_agent.py)의 `load_multiple_mcp_server_parameters()`는 `auth_type == "aws_sigv4"`인 MCP에 [agentcore_sigv4_auth.py](./runtime_agent/langgraph/agentcore_sigv4_auth.py)의 `AgentCoreSigV4Auth`를 적용합니다. LangGraph Agent Runtime의 IAM 역할로 Bedrock AgentCore invoke URL에 서명합니다.
+
+```python
+if config.get("auth_type") == "aws_sigv4":
+    connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
+        region=config.get("auth_region", "us-east-1"),
+        service=config.get("auth_service", "bedrock-agentcore"),
+    )
+```
+
+### 제공 MCP 도구
+
+Marketplace Tavily MCP 컨테이너가 노출하는 주요 도구입니다.
+
+| 도구 | 설명 |
+|------|------|
+| `tavily_search` | 실시간 웹 검색 |
+| `tavily_extract` | URL 본문 추출 |
+| `tavily_crawl` | 시드 URL 기반 사이트 탐색·추출 |
+| `tavily_map` | 접근 가능 URL 목록 수집 |
+
+### 활용 방법
+
+1. `runtime_agent/langgraph/installer.py`로 LangGraph Agent Runtime과 aws-tavily Runtime을 배포합니다.
+2. Streamlit UI에서 Agent 모드를 선택하고 MCP 체크박스에서 **`aws-tavily`** 를 선택합니다.
+3. 웹 검색이 필요한 질문을 입력하면 Agent가 `tavily_search` 등을 호출합니다.
+
+> **참고:** `tavily`(로컬 stdio)와 `aws-tavily`(원격 AgentCore)는 동시에 선택할 수 있지만, 동일한 `tavily-search` 서버 이름을 사용하므로 **하나만 선택**하는 것을 권장합니다.
+
+### Tavily Tool Interceptor
+
+
+#### 적용 이유
+
+LLM이 `tavily_search`를 호출할 때 `country` 인자에 **ISO 2자리 코드**(예: `KR`, `US`)나 **한글**(예: `한국`, `대한민국`)을 넣는 경우가 많습니다. Tavily Search API는 `country`에 **소문자 전체 국가명**(예: `south korea`, `united states`)을 기대하므로, 잘못된 값이 그대로 원격 MCP(Runtime)로 전달되면 검색 품질이 떨어지거나 오류가 납니다.
+
+로컬 stdio 방식의 `tavily`(`mcp_server_tavily.py`)는 같은 프로세스 안에서 처리되지만, `aws-tavily`는 **Bedrock AgentCore의 별도 Runtime**으로 HTTP 요청이 나갑니다. 따라서 Agent 쪽에서 인자를 한 번 정규화한 뒤 보내는 **클라이언트 측 가드**가 필요합니다.
+
+또한 시스템 프롬프트(`TAVILY_TOOL_PROMPT`)만으로는 모델이 항상 올바른 `country` 형식을 지키지 못할 수 있어, **도구 호출 직전에 코드로 보정**하는 이중 안전장치를 둡니다.
+
+#### 동작 흐름
+
+```mermaid
+sequenceDiagram
+  participant LG as LangGraph Agent
+  participant INT as TavilyToolCallInterceptor
+  participant MCP as MultiServerMCPClient
+  participant RT as aws-tavily Runtime
+
+  LG->>MCP: tavily_search(country="KR", ...)
+  MCP->>INT: MCPToolCallRequest
+  INT->>INT: country "KR" → "south korea"
+  INT->>MCP: override(args)
+  MCP->>RT: streamable HTTP + SigV4
+  RT-->>LG: 검색 결과
+```
+
+`chat.py`의 `create_agent()`는 `auth_type == "aws_sigv4"`인 MCP(aws-tavily 등 AgentCore 원격 MCP)가 포함된 경우에만 interceptor를 등록합니다.
+
+```python
+interceptors = [TavilyToolCallInterceptor()] if has_agentcore else None
+client = MultiServerMCPClient(server_params, tool_interceptors=interceptors)
+```
+
+#### 구현 내용
+
+| 구성요소 | 역할 |
+|----------|------|
+| `TAVILY_COUNTRY_ALIASES` | `kr`, `KOR`, `한국`, `us`, `usa` 등 → Tavily가 받는 전체 국가명으로 매핑 |
+| `normalize_tavily_country()` | 입력을 trim·소문자화한 뒤 alias 조회. 빈 값이면 `None` |
+| `sanitize_tavily_tool_args()` | `tavily_`로 시작하는 도구만 처리. `country`가 있으면 정규화, 비어 있으면 파라미터 제거 |
+| `TavilyToolCallInterceptor` | [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)의 `MCPToolCallRequest`를 가로채 인자 수정 후 실제 MCP handler 호출 |
+
+핵심 로직:
+
+```python
+class TavilyToolCallInterceptor:
+    async def __call__(self, request: MCPToolCallRequest, handler) -> MCPToolCallResult:
+        if request.name.startswith("tavily_"):
+            new_args = sanitize_tavily_tool_args(request.name, request.args)
+            if new_args != request.args:
+                request = request.override(args=new_args)
+        return await handler(request)
+```
+
+정규화 예시:
+
+| 모델이 보낸 `country` | interceptor 이후 |
+|----------------------|-------------------|
+| `KR` | `south korea` |
+| `한국` | `south korea` |
+| `US` | `united states` |
+| `""` (빈 문자열) | 파라미터 제거 |
+| `south korea` | 변경 없음 |
+
+변환이 일어나면 `tavily-interceptor` 로거에 `normalized country 'KR' -> 'south korea'` 형태로 INFO 로그가 남습니다.
+
+#### 관련 보완 (interceptor와 함께 적용)
+
+Interceptor는 **인자 형식**만 고칩니다. 아래는 **모델 행동** 쪽 보완으로 함께 들어가 있습니다.
+
+| 파일 | 내용 |
+|------|------|
+| [langgraph_agent.py](./runtime_agent/langgraph/langgraph_agent.py) | `TAVILY_TOOL_PROMPT` — aws-tavily가 곧 Tavily 연동임을 명시, 검색 시 즉시 `tavily_search` 호출 유도 |
+| [skill.py](./runtime_agent/langgraph/skill.py) | Agent Workflow에 MCP 검색 우선 단계, Skill 가이드에 검색 시 도구 호출 규칙 |
+| [chat.py](./runtime_agent/langgraph/chat.py) | AgentCore MCP cold start 시 `get_tools()` 최대 3회 재시도 |
+
+### 참고
+
+- 독립 배포·Streamlit 예제: [aws-tavily](https://github.com/kyopark2014/aws-tavily)
+- [Tavily MCP Server (AWS Marketplace)](https://aws.amazon.com/marketplace/pp/prodview-twjga5bwmoszq)
+- [Tavily API 문서](https://docs.tavily.com/)
+
 ## 배포하기
 
 아래와 같이 EC2를 이용해 배포 환경을 구성합니다.

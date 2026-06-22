@@ -118,8 +118,11 @@ with st.sidebar:
         # Change radio to checkbox
         mcp_options = load_capability_list("mcp.list")
         mcp_selections = {}
-        default_selections = config.get("default_mcp_servers") or ["web_fetch", "websearch"]
+        default_selections = config.get("default_mcp_servers") or ["web_fetch", "aws-tavily"]
         default_selections = [name for name in default_selections if name in mcp_options]
+        # tavily(stdio)와 aws-tavily는 동일 tavily-search 서버명을 쓰므로 동시 선택 방지
+        if "tavily" in default_selections and "aws-tavily" in default_selections:
+            default_selections = [n for n in default_selections if n != "tavily"]
 
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:
@@ -132,6 +135,9 @@ with st.sidebar:
         #     mcp_selections["basic"] = True
 
         mcp_servers = [server for server, is_selected in mcp_selections.items() if is_selected]
+        if "tavily" in mcp_servers and "aws-tavily" in mcp_servers:
+            mcp_servers = [s for s in mcp_servers if s != "tavily"]
+            logger.info("Both tavily and aws-tavily selected; using aws-tavily only.")
     else:
         mcp_servers = []
         selected_skills = []

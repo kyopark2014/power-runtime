@@ -10,12 +10,22 @@ import sys
 import os
 import json
 import shutil
+import time
 from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
+
+DEFAULT_TAVILY_CONTAINER_IMAGE_URI = (
+    "709825985650.dkr.ecr.us-east-1.amazonaws.com/tavily/tavily-mcp:v0.1.2"
+)
+AWS_TAVILY_RUNTIME_NAME = "agent_runtime_aws_tavily"
+AWS_TAVILY_RUNTIME_REGION = "us-east-1"
+ROLE_VALIDATION_MAX_RETRIES = 4
+ROLE_VALIDATION_BASE_DELAY_SEC = 5
+ROLE_VALIDATION_MAX_DELAY_SEC = 15
 
 def load_config():
     """Load config.json file."""
@@ -1211,6 +1221,222 @@ def create_agent_runtime():
         return False
 
 # ============================================================================
+# aws-tavily Agent Runtime (Marketplace Tavily MCP container)
+# ============================================================================
+
+def get_tavily_container_image_uri(config):
+    return config.get("tavily_container_image_uri", DEFAULT_TAVILY_CONTAINER_IMAGE_URI)
+
+
+def get_aws_tavily_runtime_name(config):
+    return AWS_TAVILY_RUNTIME_NAME
+
+
+def _load_tavily_api_key_for_runtime(config):
+    key = config.get("tavily_api_key") or os.environ.get("TAVILY_API_KEY")
+    if key:
+        return key
+
+    region = config.get("region", "us-west-2")
+    secret_names = []
+    if config.get("knowledge_base_name"):
+        secret_names.append(f"tavilyapikey-{config['knowledge_base_name']}")
+    if config.get("projectName"):
+        secret_names.append(f"tavilyapikey-{config['projectName']}")
+
+    secrets_client = boto3.client("secretsmanager", region_name=region)
+    for secret_name in dict.fromkeys(secret_names):
+        try:
+            response = secrets_client.get_secret_value(SecretId=secret_name)
+            secret_data = json.loads(response["SecretString"])
+            key = secret_data.get("tavily_api_key", "")
+            if key:
+                print(f"✓ Tavily API key loaded from Secrets Manager: {secret_name}")
+                return key
+        except Exception as e:
+            print(f"Could not load Tavily secret {secret_name}: {e}")
+    return ""
+
+
+def get_tavily_runtime_environment_variables(config):
+    api_key = _load_tavily_api_key_for_runtime(config)
+    if not api_key:
+        print(
+            "Warning: TAVILY_API_KEY is not set (config, env, or Secrets Manager). "
+            "Tavily search will not work in aws-tavily AgentCore runtime."
+        )
+        return None
+    return {"TAVILY_API_KEY": api_key}
+
+
+def get_mcp_protocol_configuration():
+    return {"serverProtocol": "MCP"}
+
+
+def _is_role_validation_error(error, role_arn):
+    if not isinstance(error, ClientError):
+        return False
+    code = error.response.get("Error", {}).get("Code", "")
+    message = error.response.get("Error", {}).get("Message", "")
+    if code == "InvalidParameterValueException" and "cannot be assumed" in message:
+        return True
+    return (
+        code == "ValidationException"
+        and "Role validation failed" in message
+        and role_arn in message
+    )
+
+
+def _call_with_role_validation_retry(operation, role_arn, action_label):
+    for attempt in range(ROLE_VALIDATION_MAX_RETRIES + 1):
+        try:
+            return operation()
+        except ClientError as error:
+            if not _is_role_validation_error(error, role_arn) or attempt == ROLE_VALIDATION_MAX_RETRIES:
+                raise
+            delay = min(ROLE_VALIDATION_BASE_DELAY_SEC * (2**attempt), ROLE_VALIDATION_MAX_DELAY_SEC)
+            print(
+                f"IAM role not ready yet ({action_label}), "
+                f"retrying in {delay}s ({attempt + 1}/{ROLE_VALIDATION_MAX_RETRIES})..."
+            )
+            time.sleep(delay)
+
+
+def create_aws_tavily_runtime_func(config, runtime_name, container_uri):
+    aws_region = AWS_TAVILY_RUNTIME_REGION
+    agent_runtime_role = config.get("agent_runtime_role")
+    if not agent_runtime_role:
+        print("Error: agent_runtime_role not found in config.json")
+        return None
+
+    print(f"Creating aws-tavily agent runtime: {runtime_name}")
+    print(f"Container image: {container_uri}")
+
+    try:
+        client = boto3.client("bedrock-agentcore-control", region_name=aws_region)
+
+        def _create():
+            kwargs = {
+                "agentRuntimeName": runtime_name,
+                "agentRuntimeArtifact": {
+                    "containerConfiguration": {
+                        "containerUri": container_uri,
+                    }
+                },
+                "networkConfiguration": {"networkMode": "PUBLIC"},
+                "roleArn": agent_runtime_role,
+                "protocolConfiguration": get_mcp_protocol_configuration(),
+            }
+            env = get_tavily_runtime_environment_variables(config)
+            if env:
+                kwargs["environmentVariables"] = env
+            return client.create_agent_runtime(**kwargs)
+
+        response = _call_with_role_validation_retry(
+            _create, agent_runtime_role, "create aws-tavily agent runtime"
+        )
+        print(f"✓ aws-tavily agent runtime created: {response['agentRuntimeArn']}")
+        return response["agentRuntimeArn"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConflictException":
+            print(f"aws-tavily agent runtime {runtime_name} already exists")
+            return None
+        print(f"Error creating aws-tavily agent runtime: {e}")
+        return None
+    except Exception as e:
+        print(f"Error creating aws-tavily agent runtime: {e}")
+        return None
+
+
+def update_aws_tavily_runtime_func(config, runtime_name, agent_runtime_id, container_uri):
+    aws_region = AWS_TAVILY_RUNTIME_REGION
+    agent_runtime_role = config.get("agent_runtime_role")
+    if not agent_runtime_role:
+        print("Error: agent_runtime_role not found in config.json")
+        return None
+
+    print(f"Updating aws-tavily agent runtime: {runtime_name}")
+    print(f"Container image: {container_uri}")
+
+    try:
+        client = boto3.client("bedrock-agentcore-control", region_name=aws_region)
+
+        def _update():
+            kwargs = {
+                "agentRuntimeId": agent_runtime_id,
+                "description": "Update aws-tavily agent runtime (MCP + Tavily API key)",
+                "agentRuntimeArtifact": {
+                    "containerConfiguration": {
+                        "containerUri": container_uri,
+                    }
+                },
+                "roleArn": agent_runtime_role,
+                "networkConfiguration": {"networkMode": "PUBLIC"},
+                "protocolConfiguration": get_mcp_protocol_configuration(),
+            }
+            env = get_tavily_runtime_environment_variables(config)
+            if env:
+                kwargs["environmentVariables"] = env
+            return client.update_agent_runtime(**kwargs)
+
+        response = _call_with_role_validation_retry(
+            _update, agent_runtime_role, "update aws-tavily agent runtime"
+        )
+        print(f"✓ aws-tavily agent runtime updated: {response['agentRuntimeArn']}")
+        return response["agentRuntimeArn"]
+    except Exception as e:
+        print(f"Error updating aws-tavily agent runtime: {e}")
+        return None
+
+
+def create_aws_tavily_runtime():
+    """Create/update aws-tavily AgentCore runtime (Marketplace Tavily MCP image)."""
+    print(f"\n{'='*60}")
+    print("Creating/updating aws-tavily AgentCore runtime")
+    print(f"{'='*60}")
+
+    try:
+        config = load_config()
+        aws_region = AWS_TAVILY_RUNTIME_REGION
+        runtime_name = get_aws_tavily_runtime_name(config)
+        container_uri = get_tavily_container_image_uri(config)
+        update_config("tavily_container_image_uri", container_uri)
+
+        print(f"Runtime name: {runtime_name}")
+        print(f"Container image: {container_uri}")
+
+        client = boto3.client("bedrock-agentcore-control", region_name=aws_region)
+        response = client.list_agent_runtimes()
+        agent_runtimes = response.get("agentRuntimes", [])
+
+        agent_runtime_id = None
+        for agent_runtime in agent_runtimes:
+            if agent_runtime["agentRuntimeName"] == runtime_name:
+                print(f"aws-tavily agent runtime {runtime_name} already exists")
+                agent_runtime_id = agent_runtime["agentRuntimeId"]
+                break
+
+        if agent_runtime_id:
+            agent_runtime_arn = update_aws_tavily_runtime_func(
+                config, runtime_name, agent_runtime_id, container_uri
+            )
+        else:
+            agent_runtime_arn = create_aws_tavily_runtime_func(
+                config, runtime_name, container_uri
+            )
+
+        if not agent_runtime_arn:
+            print("Error: Failed to create/update aws-tavily agent runtime")
+            return False
+
+        update_config("aws_tavily_agent_runtime_arn", agent_runtime_arn)
+        print("\n✓ aws-tavily agent runtime creation/update completed")
+        return True
+    except Exception as e:
+        print(f"Error creating/updating aws-tavily agent runtime: {e}")
+        return False
+
+# ============================================================================
 # Main Function
 # ============================================================================
 
@@ -1234,6 +1460,7 @@ def main():
         ("Creating IAM policies and roles", create_iam_policies),
         ("Building Docker image and pushing to ECR", push_to_ecr),
         ("Creating/updating AgentCore runtime", create_agent_runtime),
+        ("Creating/updating aws-tavily AgentCore runtime", create_aws_tavily_runtime),
     ]
     
     for step_name, step_func in steps:
@@ -1252,6 +1479,7 @@ def main():
     
     role_arn = config.get('agent_runtime_role')
     arn = config.get('agent_runtime_arn')
+    aws_tavily_arn = config.get('aws_tavily_agent_runtime_arn')
     knowledge_base_name = config.get('knowledge_base_name')
     knowledge_base_id = config.get('knowledge_base_id')
     
@@ -1263,6 +1491,8 @@ def main():
         print(f"Created AgentCore Runtime Role ARN: {role_arn}")
     if arn:
         print(f"Created AgentCore Runtime ARN: {arn}")
+    if aws_tavily_arn:
+        print(f"Created aws-tavily AgentCore Runtime ARN: {aws_tavily_arn}")
     
     if role_arn and arn:
         print("\nInstallation complete!")

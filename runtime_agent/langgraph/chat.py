@@ -27,6 +27,7 @@ from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMessageChunk
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from tavily_tool_interceptor import TavilyToolCallInterceptor
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -1396,29 +1397,69 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
 
     server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
 
-    for server_name, params in server_params.items():
+    has_agentcore = any(
+        cfg.get("auth_type") == "aws_sigv4"
+        for cfg in (mcp_json.get("mcpServers") or {}).values()
+    )
+
+    if server_params:
         try:
-            client = MultiServerMCPClient({server_name: params})
-            logger.info(f"MCP client initialized for server: {server_name}")
-            mcp_tools = await client.get_tools()
+            interceptors = [TavilyToolCallInterceptor()] if has_agentcore else None
+            client = MultiServerMCPClient(server_params, tool_interceptors=interceptors)
+            logger.info("MCP client is initialized successfully")
+
+            if has_agentcore:
+                logger.info(
+                    "Loading MCP tools from Bedrock AgentCore (cold start may take 1-2 minutes)..."
+                )
+
+            mcp_tools = None
+            max_retries = 3 if has_agentcore else 1
+            for attempt in range(1, max_retries + 1):
+                try:
+                    mcp_tools = await client.get_tools()
+                    break
+                except Exception as e:
+                    if attempt >= max_retries:
+                        raise
+                    wait_seconds = attempt * 15
+                    logger.warning(
+                        "MCP get_tools attempt %s/%s failed: %s. Retrying in %ss...",
+                        attempt,
+                        max_retries,
+                        e,
+                        wait_seconds,
+                    )
+                    await asyncio.sleep(wait_seconds)
+
             for tool in mcp_tools:
-                logger.info(f"mcp_tool: {tool.name} (from {server_name})")
+                logger.info(f"mcp_tool: {tool.name}")
                 if tool.name not in [t.name for t in tools]:
                     tools.append(tool)
                 else:
                     logger.info(f"mcp_tool of {tool.name} already in tools")
         except Exception as e:
-            logger.error(f"Failed to load MCP server '{server_name}': {e}")
+            logger.error(f"Error creating MCP client or getting tools: {e}")
             if getattr(e, "__cause__", None):
                 logger.error(f"  cause: {e.__cause__}")
-            logger.info(f"Continuing with remaining MCP servers (tools loaded: {len(tools)})")
-        
+            logger.info(f"Falling back to builtin tools only (count: {len(tools)})")
+
+    if "aws-tavily" in mcp_servers and not any(
+        getattr(t, "name", "").startswith("tavily_") for t in tools
+    ):
+        logger.warning(
+            "aws-tavily was selected but no tavily_* tools were loaded. "
+            "Check agent_runtime_aws_tavily in us-east-1 and Runtime IAM permissions."
+        )
+
     tools.extend(skill.get_skill_tools())
 
     skill_info = skill.get_skill_info(skill_list)
     logger.info(f"skill_info: {skill_info}")
 
     system_prompt = skill.build_skill_prompt(skill_info)
+    if any(getattr(t, "name", "").startswith("tavily_") for t in tools):
+        system_prompt += langgraph_agent.TAVILY_TOOL_PROMPT
 
     tool_list = [tool.name for tool in tools] if tools else []
     logger.info(f"tool_list: {tool_list}")

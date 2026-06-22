@@ -28,7 +28,29 @@ contents_dir = os.path.join(parent_dir, "contents")
 logger.info(f"workingDir: {workingDir}")
 logger.info(f"contents_dir: {contents_dir}")
 
-mcp_user_config = {}    
+mcp_user_config = {}
+
+AWS_TAVILY_RUNTIME_NAME = "agent_runtime_aws_tavily"
+AWS_TAVILY_RUNTIME_REGION = "us-east-1"
+
+def get_agent_runtime_arn(mcp_type: str):
+    if mcp_type == "aws-tavily":
+        agent_runtime_name = AWS_TAVILY_RUNTIME_NAME
+        lookup_region = AWS_TAVILY_RUNTIME_REGION
+    else:
+        agent_runtime_name = f"{projectName.lower().replace('-', '_')}_{mcp_type.replace('-', '_')}"
+        lookup_region = region
+    logger.info(f"agent_runtime_name: {agent_runtime_name}")
+    client = boto3.client("bedrock-agentcore-control", region_name=lookup_region)
+    response = client.list_agent_runtimes(maxResults=100)
+    logger.info(f"response: {response}")
+
+    for agent_runtime in response.get("agentRuntimes", []):
+        if agent_runtime.get("agentRuntimeName") == agent_runtime_name:
+            arn = agent_runtime["agentRuntimeArn"]
+            logger.info(f"agent_runtime_name: {agent_runtime_name}, agentRuntimeArn: {arn}")
+            return arn
+    return None
 
 def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str | None:
     client = boto3.client("bedrock-agentcore-control", region_name=gateway_region)
@@ -128,7 +150,7 @@ def load_config(mcp_type):
             }
         }
 
-    if mcp_type == "tavily":
+    elif mcp_type == "tavily":
         return {
             "mcpServers": {
                 "tavily-search": {
@@ -136,6 +158,32 @@ def load_config(mcp_type):
                     "args": [
                         f"{workingDir}/mcp_server_tavily.py"
                     ]
+                }
+            }
+        }
+
+    elif mcp_type == "aws-tavily":
+        agent_arn = get_agent_runtime_arn(mcp_type)
+        logger.info(f"mcp_type: {mcp_type}, agent_arn: {agent_arn}")
+        if not agent_arn:
+            logger.info(
+                "AgentCore aws-tavily MCP skipped: "
+                f"runtime {AWS_TAVILY_RUNTIME_NAME} not found in {AWS_TAVILY_RUNTIME_REGION}."
+            )
+            return {}
+        encoded_arn = agent_arn.replace(":", "%3A").replace("/", "%2F")
+        mcp_url = (
+            f"https://bedrock-agentcore.{AWS_TAVILY_RUNTIME_REGION}.amazonaws.com/runtimes/"
+            f"{encoded_arn}/invocations?qualifier=DEFAULT"
+        )
+        return {
+            "mcpServers": {
+                "tavily-search": {
+                    "type": "streamable_http",
+                    "url": mcp_url,
+                    "auth_type": "aws_sigv4",
+                    "auth_region": AWS_TAVILY_RUNTIME_REGION,
+                    "auth_service": "bedrock-agentcore",
                 }
             }
         }

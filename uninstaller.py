@@ -10,12 +10,15 @@ import logging
 import subprocess
 import sys
 import os
+import json
 import argparse
 from botocore.exceptions import ClientError
 
 # Configuration
 project_name = "power-runtime"
 region = "us-west-2"
+AWS_TAVILY_RUNTIME_NAME = "agent_runtime_aws_tavily"
+AWS_TAVILY_RUNTIME_REGION = "us-east-1"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
@@ -32,6 +35,10 @@ s3vectors_client = boto3.client("s3vectors", region_name=region)
 ecs_client = boto3.client("ecs", region_name=region)
 ecr_client = boto3.client("ecr", region_name=region)
 logs_client = boto3.client("logs", region_name=region)
+aws_tavily_control_client = boto3.client(
+    "bedrock-agentcore-control",
+    region_name=AWS_TAVILY_RUNTIME_REGION,
+)
 
 # Get account ID if not set
 if not account_id:
@@ -1719,6 +1726,87 @@ def retry_vpc_deletion():
     except Exception as e:
         logger.error(f"Error during VPC deletion retry: {e}")
 
+def delete_aws_tavily_runtime(skip_confirmation: bool = False) -> bool:
+    """Delete shared aws-tavily AgentCore runtime (prompted, default: keep)."""
+    logger.info("[optional] aws-tavily AgentCore runtime")
+
+    runtime_id = None
+    runtime_arn = None
+    try:
+        response = aws_tavily_control_client.list_agent_runtimes()
+        for agent_runtime in response.get("agentRuntimes", []):
+            if agent_runtime.get("agentRuntimeName") == AWS_TAVILY_RUNTIME_NAME:
+                runtime_id = agent_runtime["agentRuntimeId"]
+                runtime_arn = agent_runtime.get("agentRuntimeArn")
+                break
+
+        if not runtime_id:
+            logger.info(
+                f"  aws-tavily runtime not found: {AWS_TAVILY_RUNTIME_NAME} "
+                f"in {AWS_TAVILY_RUNTIME_REGION}"
+            )
+            return True
+
+        if not skip_confirmation:
+            print("\n" + "=" * 60)
+            print(
+                f"Shared aws-tavily runtime '{AWS_TAVILY_RUNTIME_NAME}' "
+                f"({AWS_TAVILY_RUNTIME_REGION}) will be deleted."
+            )
+            if runtime_arn:
+                print(f"  ARN: {runtime_arn}")
+            print("Other projects (aws-tavily, power-agent, etc.) may also use this runtime.")
+            print("=" * 60)
+            response = input(
+                "\nDelete aws-tavily AgentCore runtime? (yes/no) [no]: "
+            ).strip().lower()
+            if response != "yes":
+                logger.info("  Skipping aws-tavily runtime deletion (default: no).")
+                return False
+
+        aws_tavily_control_client.delete_agent_runtime(agentRuntimeId=runtime_id)
+        logger.info(f"  ✓ aws-tavily runtime deletion requested: {runtime_arn or runtime_id}")
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.info("  aws-tavily runtime already deleted")
+            return True
+        logger.warning(f"  Could not delete aws-tavily runtime: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error deleting aws-tavily runtime: {e}")
+        return False
+
+
+def clear_aws_tavily_config():
+    """Remove aws-tavily fields from runtime_agent/langgraph/config.json."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "runtime_agent", "langgraph", "config.json")
+    installer_fields = [
+        "aws_tavily_agent_runtime_arn",
+        "tavily_container_image_uri",
+    ]
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+    except FileNotFoundError:
+        logger.debug(f"  {config_path} not found, skipping")
+        return
+    except Exception as e:
+        logger.warning(f"  Could not read {config_path}: {e}")
+        return
+
+    for field in installer_fields:
+        config_data.pop(field, None)
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+        logger.info(f"✓ Cleared aws-tavily fields from {config_path}")
+    except Exception as e:
+        logger.warning(f"  Could not update {config_path}: {e}")
+
 def uninstall_agent_runtime(runtime_type: str = "langgraph") -> bool:
     """Uninstall Agent Runtime by running the appropriate uninstaller.py script."""
     logger.info(f"[10/10] Uninstalling Agent Runtime: {runtime_type}")
@@ -1765,6 +1853,14 @@ def main():
         action="store_true",
         help="Skip confirmation prompt and proceed with deletion"
     )
+    parser.add_argument(
+        "--delete-aws-tavily",
+        action="store_true",
+        help=(
+            "Delete shared aws-tavily AgentCore runtime without a separate confirmation prompt "
+            "(default: ask, default answer no)"
+        ),
+    )
     
     args = parser.parse_args()
     
@@ -1782,6 +1878,10 @@ def main():
         logger.info("="*60)
         logger.info("WARNING: This will delete all AWS infrastructure resources")
         logger.info("="*60)
+        print(
+            f"\nOptional shared resource (prompted separately, default: keep):\n"
+            f"  aws-tavily runtime: {AWS_TAVILY_RUNTIME_NAME} ({AWS_TAVILY_RUNTIME_REGION})"
+        )
         response = input("\nAre you sure you want to continue? (yes/no): ")
         if response.lower() != 'yes':
             logger.info("Uninstallation cancelled.")
@@ -1790,6 +1890,17 @@ def main():
     start_time = time.time()
     
     try:
+        aws_tavily_deleted = delete_aws_tavily_runtime(
+            skip_confirmation=args.delete_aws_tavily
+        )
+        if aws_tavily_deleted:
+            clear_aws_tavily_config()
+        elif not args.delete_aws_tavily:
+            logger.info(
+                f"[skip] aws-tavily runtime retained (shared resource): "
+                f"{AWS_TAVILY_RUNTIME_NAME} in {AWS_TAVILY_RUNTIME_REGION}"
+            )
+
         delete_cloudfront_distributions()
         delete_ecs_resources()
         delete_alb_resources()

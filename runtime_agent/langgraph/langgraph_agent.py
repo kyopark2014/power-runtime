@@ -578,6 +578,17 @@ BASE_SYSTEM_PROMPT = (
     "한국어로 답변하세요."
 )
 
+TAVILY_TOOL_PROMPT = (
+    "\n\n## Tavily 검색 도구 (aws-tavily MCP)\n"
+    "당신은 tavily_search 등 Tavily 도구를 **이미 사용할 수 있습니다**. "
+    "aws-tavily MCP가 바로 Tavily 연동이므로, 'AWS Tavily 플러그인이 없다'거나 "
+    "'외부 서비스와 연동할 수 없다'고 말하지 마세요.\n"
+    "실시간 웹 검색·맛집·뉴스 등 최신 정보가 필요하면 **먼저 말로 약속하지 말고** "
+    "즉시 tavily_search를 호출하세요. 검색 전 사과나 연동 불가 안내는 하지 마세요.\n"
+    "tavily_search 호출 시 country는 ISO 코드(KR, US)를 쓰지 마세요. "
+    "한국 검색이 필요하면 country를 생략하거나 'south korea'만 사용하세요."
+)
+
 MAX_CONTEXT_TURNS = 5
 
 
@@ -760,7 +771,7 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
                 connection = {
                     "transport": "streamable_http",
                     "url": config.get("url"),
-                    "headers": config.get("headers", {})
+                    "headers": config.get("headers", {}),
                 }
                 if config.get("auth_type") == "aws_sigv4":
                     connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
