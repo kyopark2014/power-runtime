@@ -16,16 +16,48 @@ from botocore.exceptions import ClientError, NoCredentialsError
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
 
+
+def _repo_root() -> str:
+    return os.path.normpath(os.path.join(script_dir, "..", ".."))
+
+
+def _application_config_path() -> str:
+    return os.path.join(_repo_root(), "application", "config.json")
+
+
+def _default_config() -> dict:
+    session = boto3.Session()
+    region = session.region_name or "us-west-2"
+    account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+    return {
+        "region": region,
+        "accountId": account_id,
+        "projectName": "power-runtime",
+    }
+
+
 def load_config():
-    """Load config.json file."""
+    """Load config.json, falling back to application/config.json or defaults."""
+    config = None
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
-    except Exception as e:
-        print(f"Failed to parse config.json file: {e}")
-        print("Error: config.json file is required for uninstallation")
-        return None
-    
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    if not config:
+        app_config_path = _application_config_path()
+        try:
+            with open(app_config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                print(f"Loaded config from {app_config_path}")
+        except (OSError, json.JSONDecodeError):
+            config = _default_config()
+            print(
+                "Warning: config.json and application/config.json not found; "
+                f"using defaults (projectName={config['projectName']})"
+            )
+
     return config
 
 # ============================================================================
@@ -42,7 +74,6 @@ def delete_agent_runtime():
         config = load_config()
         if not config:
             return False
-            
         aws_region = config.get('region')
         project_name = config.get('projectName')
         agent_runtime_arn = config.get('agent_runtime_arn')
@@ -197,7 +228,6 @@ def delete_ecr_repository():
         config = load_config()
         if not config:
             return False
-            
         aws_region = config.get('region')
         project_name = config.get('projectName')
         ecr_repository = config.get('ecr_repository')

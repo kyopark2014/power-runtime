@@ -39,6 +39,7 @@ aws_tavily_control_client = boto3.client(
     "bedrock-agentcore-control",
     region_name=AWS_TAVILY_RUNTIME_REGION,
 )
+agentcore_control_client = boto3.client("bedrock-agentcore-control", region_name=region)
 s3files_client = boto3.client("s3files", region_name=region)
 
 # Get account ID if not set
@@ -420,7 +421,7 @@ def delete_single_vpc(vpc_id: str) -> bool:
         except Exception as e:
             logger.info(f"    Error handling VPC endpoints: {e}")
         
-        # Delete network interfaces
+        # Delete network interfaces (available only; agentic_ai ENIs require runtime deletion first)
         try:
             enis = ec2_client.describe_network_interfaces(
                 Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
@@ -429,8 +430,15 @@ def delete_single_vpc(vpc_id: str) -> bool:
                 if eni["Status"] == "available":
                     ec2_client.delete_network_interface(NetworkInterfaceId=eni["NetworkInterfaceId"])
                     logger.info(f"    ✓ Deleted network interface: {eni['NetworkInterfaceId']}")
+                elif eni.get("InterfaceType") == "agentic_ai":
+                    logger.info(
+                        f"    AgentCore ENI still in use: {eni['NetworkInterfaceId']} "
+                        f"(subnet {eni.get('SubnetId')})"
+                    )
         except Exception as e:
             logger.warning(f"    Could not delete network interfaces: {e}")
+
+        wait_for_agentic_ai_enis_cleared([vpc_id], max_wait_seconds=300, label=f"VPC {vpc_id}")
         
         # Delete NAT gateways with proper route cleanup
         nat_gws = ec2_client.describe_nat_gateways(
@@ -1911,6 +1919,124 @@ def delete_local_config_files() -> None:
     logger.info("✓ Local config files processed")
 
 
+def _find_project_vpc_ids() -> list:
+    """Return VPC IDs tagged for this project."""
+    vpc_name = f"vpc-for-{project_name}"
+    try:
+        response = ec2_client.describe_vpcs(
+            Filters=[{"Name": "tag:Name", "Values": [vpc_name]}]
+        )
+        return [vpc["VpcId"] for vpc in response.get("Vpcs", [])]
+    except ClientError as error:
+        logger.warning(f"  Could not list project VPCs: {error}")
+        return []
+
+
+def _list_agentic_ai_enis(vpc_ids: list) -> list:
+    """Return in-use AgentCore (agentic_ai) ENIs in the given VPCs."""
+    enis = []
+    for vpc_id in vpc_ids:
+        try:
+            response = ec2_client.describe_network_interfaces(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            )
+            for eni in response.get("NetworkInterfaces", []):
+                if eni.get("InterfaceType") == "agentic_ai":
+                    enis.append(eni)
+        except ClientError as error:
+            logger.warning(f"  Could not list ENIs for {vpc_id}: {error}")
+    return enis
+
+
+def wait_for_agentic_ai_enis_cleared(
+    vpc_ids: list,
+    max_wait_seconds: int = 900,
+    poll_seconds: int = 30,
+    label: str = "project VPC",
+) -> bool:
+    """Wait until Bedrock AgentCore VPC ENIs are released."""
+    if not vpc_ids:
+        return True
+
+    logger.info(
+        f"  Waiting for AgentCore ENIs to clear in {label} "
+        f"(up to {max_wait_seconds // 60} min)..."
+    )
+    deadline = time.time() + max_wait_seconds
+    while time.time() < deadline:
+        remaining = _list_agentic_ai_enis(vpc_ids)
+        if not remaining:
+            logger.info(f"  ✓ No AgentCore ENIs remain in {label}")
+            return True
+
+        ids = [eni["NetworkInterfaceId"] for eni in remaining]
+        logger.info(
+            f"  {len(remaining)} AgentCore ENI(s) still attached: {', '.join(ids)}"
+        )
+        time.sleep(poll_seconds)
+
+    remaining = _list_agentic_ai_enis(vpc_ids)
+    if remaining:
+        ids = [eni["NetworkInterfaceId"] for eni in remaining]
+        logger.warning(
+            f"  ⚠ AgentCore ENIs still present after wait: {', '.join(ids)}. "
+            "Subnet/VPC deletion may fail until AWS releases them."
+        )
+        return False
+    return True
+
+
+def delete_langgraph_agent_runtime_direct(max_wait_seconds: int = 600) -> bool:
+    """Delete LangGraph Agent Runtime by name even when local config.json is missing."""
+    runtime_name = f"{project_name.replace('-', '_')}_langgraph"
+    logger.info(f"[1.5/10] Deleting LangGraph Agent Runtime: {runtime_name}")
+
+    runtime_id = None
+    try:
+        response = agentcore_control_client.list_agent_runtimes()
+        for item in response.get("agentRuntimes", []):
+            if item.get("agentRuntimeName") == runtime_name:
+                runtime_id = item.get("agentRuntimeId")
+                break
+    except ClientError as error:
+        logger.warning(f"  Could not list Agent Runtimes: {error}")
+        return False
+
+    if not runtime_id:
+        logger.info(f"  Agent Runtime not found (may already be deleted): {runtime_name}")
+        return wait_for_agentic_ai_enis_cleared(_find_project_vpc_ids(), max_wait_seconds=300)
+
+    try:
+        agentcore_control_client.delete_agent_runtime(agentRuntimeId=runtime_id)
+        logger.info(f"  ✓ Agent Runtime deletion requested: {runtime_name} ({runtime_id})")
+    except ClientError as error:
+        if error.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.info(f"  Agent Runtime already deleted: {runtime_name}")
+        else:
+            logger.warning(f"  Could not delete Agent Runtime {runtime_name}: {error}")
+            return False
+
+    deadline = time.time() + max_wait_seconds
+    while time.time() < deadline:
+        try:
+            response = agentcore_control_client.list_agent_runtimes()
+            exists = any(
+                item.get("agentRuntimeName") == runtime_name
+                for item in response.get("agentRuntimes", [])
+            )
+            if not exists:
+                logger.info(f"  ✓ Agent Runtime deleted: {runtime_name}")
+                break
+        except ClientError as error:
+            logger.warning(f"  Error checking Agent Runtime status: {error}")
+            break
+        time.sleep(10)
+    else:
+        logger.warning(f"  Timed out waiting for Agent Runtime deletion: {runtime_name}")
+
+    return wait_for_agentic_ai_enis_cleared(_find_project_vpc_ids(), max_wait_seconds=600)
+
+
 def delete_aws_tavily_runtime(skip_confirmation: bool = False) -> bool:
     """Delete shared aws-tavily AgentCore runtime (prompted, default: keep)."""
     logger.info("[optional] aws-tavily AgentCore runtime")
@@ -2087,10 +2213,11 @@ def main():
             )
 
         delete_cloudfront_distributions()
+        delete_langgraph_agent_runtime_direct()
         if uninstall_agent_runtime("langgraph"):
-            logger.info("Langgraph agent runtime uninstalled...")
+            logger.info("Langgraph agent runtime resources uninstalled...")
         else:
-            logger.warning("Langgraph agent runtime uninstall failed or was skipped.")
+            logger.warning("Langgraph agent runtime uninstall subprocess had warnings.")
 
         delete_ecs_resources()
         delete_alb_resources()
@@ -2104,7 +2231,9 @@ def main():
         
         delete_security_groups()
         delete_route_tables()
-        
+
+        wait_for_agentic_ai_enis_cleared(_find_project_vpc_ids(), max_wait_seconds=300)
+
         failed_vpcs = delete_vpc_resources()
         
         delete_opensearch_collection()
@@ -2113,13 +2242,15 @@ def main():
         delete_iam_roles()
         delete_s3_buckets()
         delete_disabled_cloudfront_distributions()
-        delete_local_config_files()
-        
+
         # Retry VPC deletion only if there were failures
         if failed_vpcs:
             logger.info(f"  VPC deletion failed for {len(failed_vpcs)} VPC(s): {failed_vpcs}")
+            wait_for_agentic_ai_enis_cleared(failed_vpcs, max_wait_seconds=600)
             logger.info("  Retrying VPC deletion after CloudFront cleanup...")
             retry_vpc_deletion()
+
+        delete_local_config_files()
         
         elapsed_time = time.time() - start_time
         logger.info("")
