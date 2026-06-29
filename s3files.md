@@ -1,6 +1,6 @@
-# Amazon S3 Files — power-runtime 적용 가이드
+# Amazon S3 Files — Agent Runtime 적용 가이드
 
-여기에서는 **Amazon S3 Files**가 무엇인지, **power-runtime**에서 왜·어떻게 쓰는지, boto3로 생성하는 방법, 필요한 IAM 권한, Agent Runtime 연동 및 LangGraph checkpoint 동작을 설명합니다.
+여기에서는 **Amazon S3 Files**가 무엇인지, **agent-runtime**에서 왜·어떻게 쓰는지, boto3로 생성하는 방법, 필요한 IAM 권한, Agent Runtime 연동 및 LangGraph checkpoint 동작을 설명합니다.
 
 관련 코드:
 
