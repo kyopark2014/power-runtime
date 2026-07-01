@@ -438,8 +438,6 @@ def delete_single_vpc(vpc_id: str) -> bool:
         except Exception as e:
             logger.warning(f"    Could not delete network interfaces: {e}")
 
-        wait_for_agentic_ai_enis_cleared([vpc_id], max_wait_seconds=300, label=f"VPC {vpc_id}")
-        
         # Delete NAT gateways with proper route cleanup
         nat_gws = ec2_client.describe_nat_gateways(
             Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
@@ -1932,8 +1930,70 @@ def _find_project_vpc_ids() -> list:
         return []
 
 
+def _get_subnet_ids_for_vpcs(vpc_ids: list) -> set:
+    """Return all subnet IDs in the given VPCs."""
+    subnet_ids = set()
+    for vpc_id in vpc_ids:
+        try:
+            response = ec2_client.describe_subnets(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            )
+            subnet_ids.update(
+                subnet["SubnetId"] for subnet in response.get("Subnets", [])
+            )
+        except ClientError as error:
+            logger.warning(f"  Could not list subnets for {vpc_id}: {error}")
+    return subnet_ids
+
+
+def _list_agent_runtimes_using_project_vpc(vpc_ids: list) -> list:
+    """Return Agent Runtimes that still use subnets in the given VPCs."""
+    project_subnet_ids = _get_subnet_ids_for_vpcs(vpc_ids)
+    if not project_subnet_ids:
+        return []
+
+    matching = []
+    try:
+        response = agentcore_control_client.list_agent_runtimes()
+        runtimes = response.get("agentRuntimes", [])
+    except ClientError as error:
+        logger.warning(f"  Could not list Agent Runtimes: {error}")
+        return []
+
+    for runtime in runtimes:
+        runtime_id = runtime.get("agentRuntimeId")
+        if not runtime_id:
+            continue
+        try:
+            detail = agentcore_control_client.get_agent_runtime(
+                agentRuntimeId=runtime_id
+            )
+        except ClientError:
+            continue
+
+        network = detail.get("networkConfiguration") or {}
+        if network.get("networkMode") != "VPC":
+            continue
+
+        runtime_subnets = set(
+            (network.get("networkModeConfig") or {}).get("subnets") or []
+        )
+        if runtime_subnets & project_subnet_ids:
+            matching.append(runtime)
+
+    return matching
+
+
+def _format_agentic_ai_eni(eni: dict) -> str:
+    """Format AgentCore ENI details for logging."""
+    return (
+        f"{eni['NetworkInterfaceId']} "
+        f"(status={eni.get('Status')}, subnet={eni.get('SubnetId')})"
+    )
+
+
 def _list_agentic_ai_enis(vpc_ids: list) -> list:
-    """Return in-use AgentCore (agentic_ai) ENIs in the given VPCs."""
+    """Return AgentCore (agentic_ai) ENIs in the given VPCs."""
     enis = []
     for vpc_id in vpc_ids:
         try:
@@ -1958,22 +2018,43 @@ def wait_for_agentic_ai_enis_cleared(
     if not vpc_ids:
         return True
 
+    remaining_runtimes = _list_agent_runtimes_using_project_vpc(vpc_ids)
+    if remaining_runtimes:
+        runtime_names = [
+            runtime.get("agentRuntimeName") or runtime.get("agentRuntimeId")
+            for runtime in remaining_runtimes
+        ]
+        logger.warning(
+            f"  {len(remaining_runtimes)} Agent Runtime(s) still use {label}: "
+            f"{', '.join(runtime_names)}. "
+            "AgentCore ENIs will remain until those runtimes are deleted."
+        )
+        return False
+
+    remaining = _list_agentic_ai_enis(vpc_ids)
+    if not remaining:
+        logger.info(f"  ✓ No AgentCore ENIs remain in {label}")
+        return True
+
     logger.info(
-        f"  Waiting for AgentCore ENIs to clear in {label} "
+        f"  Waiting for {len(remaining)} AgentCore ENI(s) to clear in {label} "
         f"(up to {max_wait_seconds // 60} min)..."
     )
+    for eni in remaining:
+        logger.info(f"    {_format_agentic_ai_eni(eni)}")
+
     deadline = time.time() + max_wait_seconds
     while time.time() < deadline:
+        time.sleep(poll_seconds)
         remaining = _list_agentic_ai_enis(vpc_ids)
         if not remaining:
             logger.info(f"  ✓ No AgentCore ENIs remain in {label}")
             return True
 
-        ids = [eni["NetworkInterfaceId"] for eni in remaining]
         logger.info(
-            f"  {len(remaining)} AgentCore ENI(s) still attached: {', '.join(ids)}"
+            f"  {len(remaining)} AgentCore ENI(s) still attached: "
+            f"{', '.join(_format_agentic_ai_eni(eni) for eni in remaining)}"
         )
-        time.sleep(poll_seconds)
 
     remaining = _list_agentic_ai_enis(vpc_ids)
     if remaining:
@@ -2004,7 +2085,7 @@ def delete_langgraph_agent_runtime_direct(max_wait_seconds: int = 600) -> bool:
 
     if not runtime_id:
         logger.info(f"  Agent Runtime not found (may already be deleted): {runtime_name}")
-        return wait_for_agentic_ai_enis_cleared(_find_project_vpc_ids(), max_wait_seconds=300)
+        return True
 
     try:
         agentcore_control_client.delete_agent_runtime(agentRuntimeId=runtime_id)
@@ -2034,7 +2115,10 @@ def delete_langgraph_agent_runtime_direct(max_wait_seconds: int = 600) -> bool:
     else:
         logger.warning(f"  Timed out waiting for Agent Runtime deletion: {runtime_name}")
 
-    return wait_for_agentic_ai_enis_cleared(_find_project_vpc_ids(), max_wait_seconds=600)
+    logger.info(
+        "  AgentCore ENI release is deferred until after ECS/ALB/VPC endpoint cleanup."
+    )
+    return True
 
 
 def delete_aws_tavily_runtime(skip_confirmation: bool = False) -> bool:
@@ -2232,7 +2316,12 @@ def main():
         delete_security_groups()
         delete_route_tables()
 
-        wait_for_agentic_ai_enis_cleared(_find_project_vpc_ids(), max_wait_seconds=300)
+        logger.info(
+            "[pre-VPC] Waiting for AgentCore ENIs to clear after resource cleanup..."
+        )
+        wait_for_agentic_ai_enis_cleared(
+            _find_project_vpc_ids(), max_wait_seconds=900
+        )
 
         failed_vpcs = delete_vpc_resources()
         
