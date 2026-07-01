@@ -2078,6 +2078,64 @@ def create_vpc_resource(vpc_name: str, cidr_block: str) -> str:
         raise
 
 
+def _is_valid_dhcp_options_id(dhcp_options_id: Optional[str]) -> bool:
+    """Return True if dhcp_options_id exists in the current region."""
+    if not dhcp_options_id or not str(dhcp_options_id).startswith("dopt-"):
+        return False
+    try:
+        ec2_client.describe_dhcp_options(DhcpOptionsIds=[dhcp_options_id])
+        return True
+    except ClientError:
+        return False
+
+
+def get_or_create_dhcp_options() -> str:
+    """Return a valid regional DHCP options set ID."""
+    dhcp_options = ec2_client.describe_dhcp_options().get("DhcpOptions", [])
+    if dhcp_options:
+        return dhcp_options[0]["DhcpOptionsId"]
+
+    logger.info("  Creating regional DHCP options set...")
+    response = ec2_client.create_dhcp_options(
+        DhcpConfigurations=[
+            {
+                "Key": "domain-name-servers",
+                "Values": [{"Value": "AmazonProvidedDNS"}],
+            }
+        ],
+        TagSpecifications=[
+            {
+                "ResourceType": "dhcp-options",
+                "Tags": [{"Key": "Name", "Value": f"dhcp-options-for-{project_name}"}],
+            }
+        ],
+    )
+    dhcp_options_id = response["DhcpOptions"]["DhcpOptionsId"]
+    logger.info(f"  ✓ Created DHCP options set: {dhcp_options_id}")
+    return dhcp_options_id
+
+
+def ensure_vpc_dhcp_options(vpc_id: str) -> None:
+    """Ensure the VPC is associated with a valid DHCP options set.
+
+    Fargate/ECS task placement fails with InvalidDhcpOptionID.NotFound when the VPC
+    references a missing or literal \"default\" DHCP options ID.
+    """
+    vpc = ec2_client.describe_vpcs(VpcIds=[vpc_id])["Vpcs"][0]
+    current_dhcp_id = vpc.get("DhcpOptionsId")
+    if _is_valid_dhcp_options_id(current_dhcp_id):
+        logger.debug(f"VPC {vpc_id} DHCP options OK: {current_dhcp_id}")
+        return
+
+    dhcp_options_id = get_or_create_dhcp_options()
+    logger.warning(
+        f"VPC {vpc_id} has invalid DHCP options ({current_dhcp_id!r}); "
+        f"associating {dhcp_options_id}"
+    )
+    ec2_client.associate_dhcp_options(DhcpOptionsId=dhcp_options_id, VpcId=vpc_id)
+    logger.info(f"  ✓ Associated DHCP options {dhcp_options_id} with VPC {vpc_id}")
+
+
 def create_private_subnets(
     vpc_id: str,
     availability_zones: List[str],
@@ -2346,7 +2404,8 @@ def create_vpc() -> Dict[str, str]:
     if vpcs["Vpcs"]:
         vpc_id = vpcs["Vpcs"][0]["VpcId"]
         logger.warning(f"VPC already exists: {vpc_id}")
-        
+        ensure_vpc_dhcp_options(vpc_id)
+
         try:
             # Get existing resources
             subnets = ec2_client.describe_subnets(
@@ -2628,7 +2687,8 @@ def create_vpc() -> Dict[str, str]:
     logger.debug("Enabling DNS hostnames and DNS support")
     ec2_client.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
     ec2_client.modify_vpc_attribute(VpcId=vpc_id, EnableDnsSupport={"Value": True})
-    
+    ensure_vpc_dhcp_options(vpc_id)
+
     # Get availability zones
     logger.debug("Getting availability zones")
     azs = ec2_client.describe_availability_zones()["AvailabilityZones"][:2]
