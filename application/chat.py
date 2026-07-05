@@ -28,17 +28,7 @@ model_name = "Claude 4.5 Haiku"
 model_type = "claude"
 models = info.get_model_info(model_name)
 model_id = models[0]["model_id"]
-
-# runtime_session_id = str(uuid.uuid4())
-runtime_session_id = "langgraph"
-logger.info(f"runtime_session_id: {runtime_session_id}")
 user_id = None 
-
-def initiate():
-    global runtime_session_id
-    runtime_session_id=str(uuid.uuid4())
-    logger.info(f"runtime_session_id: {runtime_session_id}")
-
 debug_mode = 'Disable'
 
 def update(modelName):
