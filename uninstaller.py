@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 AWS Infrastructure Uninstaller
-This script deletes all AWS infrastructure resources created by installer.py.
+This script deletes all AWS infrastructure resources created by installer.py,
+including the project CloudWatch monitoring dashboard ({projectName}-monitoring).
 """
 
 import boto3
@@ -41,6 +42,7 @@ aws_tavily_control_client = boto3.client(
 )
 agentcore_control_client = boto3.client("bedrock-agentcore-control", region_name=region)
 s3files_client = boto3.client("s3files", region_name=region)
+cloudwatch_client = boto3.client("cloudwatch", region_name=region)
 
 # Get account ID if not set
 if not account_id:
@@ -1756,6 +1758,60 @@ def _runtime_agent_config_path() -> str:
     return os.path.join(script_dir, "runtime_agent", "langgraph", "config.json")
 
 
+def _load_runtime_agent_config() -> dict:
+    config_path = _runtime_agent_config_path()
+    if not os.path.isfile(config_path):
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"  Could not read {config_path}: {exc}")
+        return {}
+
+
+def _monitoring_dashboard_name() -> str:
+    """Resolve project CloudWatch monitoring dashboard name."""
+    for config in (_load_runtime_agent_config(), _load_application_config()):
+        name = config.get("cloudwatch_dashboard_name")
+        if name:
+            return name
+        project = config.get("projectName")
+        if project:
+            return f"{str(project).replace(' ', '-')}-monitoring"
+    return f"{project_name.replace(' ', '-')}-monitoring"
+
+
+def _delete_cloudwatch_dashboard(name: str) -> None:
+    """Delete a single CloudWatch dashboard (no-op if already gone)."""
+    if not name:
+        return
+    try:
+        cloudwatch_client.delete_dashboards(DashboardNames=[name])
+        logger.info(f"  ✓ Deleted CloudWatch dashboard: {name}")
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code in ("ResourceNotFound", "ResourceNotFoundException"):
+            logger.info(f"  CloudWatch dashboard not found (already deleted): {name}")
+        else:
+            logger.warning(f"  Could not delete CloudWatch dashboard '{name}': {error}")
+    except Exception as error:
+        logger.warning(f"  Could not delete CloudWatch dashboard '{name}': {error}")
+
+
+def delete_cloudwatch_dashboards() -> None:
+    """Delete the project-specific CloudWatch monitoring dashboard.
+
+    Removes {projectName}-monitoring only. Bedrock-Usage-Dashboard is shared
+    across deployments and is left intact.
+    """
+    logger.info("[AgentCore] Deleting CloudWatch monitoring dashboard")
+    dashboard = _monitoring_dashboard_name()
+    logger.info(f"  Dashboard: {dashboard}")
+    _delete_cloudwatch_dashboard(dashboard)
+    logger.info("✓ CloudWatch dashboard deletion processed")
+
+
 def _is_s3files_not_found(error: ClientError) -> bool:
     code = error.response.get("Error", {}).get("Code", "")
     return code in {"ResourceNotFoundException", "NotFoundException", "NoSuchResource"}
@@ -2282,6 +2338,8 @@ def main():
             logger.info("Langgraph agent runtime resources uninstalled...")
         else:
             logger.warning("Langgraph agent runtime uninstall subprocess had warnings.")
+
+        delete_cloudwatch_dashboards()
 
         delete_ecs_resources()
         delete_alb_resources()
