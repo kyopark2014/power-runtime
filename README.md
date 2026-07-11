@@ -519,6 +519,9 @@ cd ../..
 
 #### 2) 백엔드 실행
 
+로컬 개발 시 Web UI 백엔드는 **Docker 없이 uvicorn**으로 실행하고, Agent 추론은 **항상 AgentCore Runtime**(`invoke_agent_runtime`)을 사용합니다. `run_agent_in_docker` / `localhost:8080` 로컬 Docker agent 경로는 사용하지 않습니다.
+
+
 `routes_chat.py`, `agentcore_client.py` 등 Python 코드를 수정했다면 서버를 **재시작**해야 반영됩니다.
 
 ```text
