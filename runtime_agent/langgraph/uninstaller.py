@@ -66,6 +66,11 @@ def load_config():
 # Agent Runtime Deletion Functions
 # ============================================================================
 
+def agent_runtime_name(project_name: str) -> str:
+    """Return Bedrock AgentCore runtime name (e.g. power_runtime)."""
+    return project_name.replace("-", "_")
+
+
 def _resolve_region(config: dict) -> str:
     return (
         config.get("region")
@@ -370,8 +375,21 @@ def delete_agent_runtime():
         # Get current folder name
         current_folder_name = os.path.basename(os.getcwd())
         repository_name = f"{project_name}_{current_folder_name}"
-        # Convert hyphens to underscores for agent runtime name (AWS validation requirement)
-        runtime_name = repository_name.replace('-', '_')
+        runtime_name = agent_runtime_name(project_name)
+        legacy_runtime_name = agent_runtime_name(current_folder_name)
+        legacy_prefixed_project = f"runtime_{project_name.replace('-', '_')}"
+        legacy_prefixed_type = f"runtime_{current_folder_name.replace('-', '_')}"
+        candidate_runtime_names = [runtime_name]
+        for legacy_name in (
+            legacy_runtime_name,
+            legacy_prefixed_project,
+            legacy_prefixed_type,
+        ):
+            if legacy_name not in candidate_runtime_names:
+                candidate_runtime_names.append(legacy_name)
+        legacy_repository_name = repository_name.replace("-", "_")
+        if legacy_repository_name not in candidate_runtime_names:
+            candidate_runtime_names.append(legacy_repository_name)
         
         try:
             client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
@@ -413,8 +431,7 @@ def delete_agent_runtime():
                 agent_runtimes = response.get('agentRuntimes', [])
                 
                 for agent_runtime in agent_runtimes:
-                    # Use runtime_name (with underscores) for comparison
-                    if agent_runtime['agentRuntimeName'] == runtime_name:
+                    if agent_runtime['agentRuntimeName'] in candidate_runtime_names:
                         runtime_id = agent_runtime['agentRuntimeId']
                         actual_runtime_name = agent_runtime['agentRuntimeName']
                         try:
@@ -431,7 +448,7 @@ def delete_agent_runtime():
                                 return False
                 
                 if not deletion_requested:
-                    print(f"Agent runtime {runtime_name} not found (may already be deleted)")
+                    print(f"Agent runtime {candidate_runtime_names} not found (may already be deleted)")
                     return True
             
             # Wait for deletion to complete
