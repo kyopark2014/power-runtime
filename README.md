@@ -349,7 +349,7 @@ if "text/event-stream" in response.get("contentType", ""):
 
 ## 코드 구조
 
-프로젝트는 **Codex형 Web UI(`application/`)** 와 **LangGraph Agent Runtime(`runtime_agent/langgraph/`)** 으로 나뉩니다. 루트 [installer.py](./installer.py)는 ECS·VPC·Knowledge Base·**S3 Files 세션 스토리지**를 배포하고, [runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)는 AgentCore Runtime·ECR·IAM을 배포합니다. UI는 ECS에서 사용자 입력·MCP/Skill·모델 선택과 스트리밍 결과 표시만 담당하고, LLM 추론·MCP·Skill 실행·대화 checkpoint 저장은 AgentCore Runtime 컨테이너에서 수행합니다.
+프로젝트는 ** Web UI(`application/`)** 와 **LangGraph Agent Runtime(`runtime_agent/langgraph/`)** 으로 나뉩니다. 루트 [installer.py](./installer.py)는 ECS·VPC·Knowledge Base·**S3 Files 세션 스토리지**를 배포하고, [runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)는 AgentCore Runtime·ECR·IAM을 배포합니다. UI는 ECS에서 사용자 입력·MCP/Skill·모델 선택과 스트리밍 결과 표시만 담당하고, LLM 추론·MCP·Skill 실행·대화 checkpoint 저장은 AgentCore Runtime 컨테이너에서 수행합니다.
 
 ```text
 Web UI (ECS)                            AgentCore Runtime
@@ -361,7 +361,7 @@ application/agentcore_client.py  ──SSE──▶  chat.py · skill.py · mcp_
   invoke_agent_runtime
 ```
 
-### `application/` — Codex형 Web UI (ECS)
+### `application/` — Web UI (ECS)
 
 루트 [Dockerfile](./Dockerfile)로 빌드되어 ECS에 배포됩니다. FastAPI + React SPA이며, AgentCore Runtime을 `invoke_agent_runtime`으로 호출합니다.
 
@@ -387,11 +387,13 @@ application/
 | `server.py` | FastAPI 앱, `/api/*` REST·SSE, React SPA 서빙 |
 | `task_store.py` | New task별 `runtime_session_id`·UI 메시지 영속 |
 | `agentcore_client.py` | payload를 Runtime으로 전송, SSE 스트림 처리. 태스크별 `runtime_session_id` 지원 |
-| `web/` | Codex형 사이드바(New task, Skill, MCP, Model) + 채팅 UI |
+| `web/` | 사이드바(New task, Skill, MCP, Model) + 채팅 UI |
 
-### App UI
+## App UI
 
-Web UI는 **FastAPI 백엔드 + React SPA**로 구성됩니다. ECS(또는 로컬 `8501`)에서 `application/server.py`가 API와 빌드된 정적 파일(`application/web/dist/`)을 함께 제공합니다.
+Web UI는 **FastAPI 백엔드 + React SPA**로 구성됩니다. Streamlit을 대체한 Agent 레이아웃이며, ECS(또는 로컬 `8501`)에서 `application/server.py`가 API와 빌드된 정적 파일(`application/web/dist/`)을 함께 제공합니다.
+
+### 기술 스택
 
 | 구분 | 기술 | 용도 |
 |------|------|------|
@@ -400,15 +402,83 @@ Web UI는 **FastAPI 백엔드 + React SPA**로 구성됩니다. ECS(또는 로�
 | **백엔드** | `agentcore_client.py` | AgentCore Runtime `invoke_agent_runtime` 호출 |
 | **프론트엔드** | React 19, TypeScript | SPA UI |
 | **프론트엔드** | Vite 6 | 개발 서버·프로덕션 빌드 |
+| **프론트엔드** | react-markdown, remark-gfm | Assistant 응답 Markdown 렌더링 |
+| **프론트엔드** | CSS (`agent.css`) | 다크 테마 Agent 레이아웃 |
 | **인증** | HttpOnly Cookie (`agent_user_id`) | User ID 세션 유지 |
 
-#### REST / SSE API
+### 화면 구조
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ UserIdModal (최초 진입 · 쿠키 없음)                          │
+│   User ID 입력 → /api/session POST                           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────┬──────────────────────────────────────────────┐
+│ Sidebar      │ Main Panel                                   │
+│              │                                              │
+│ • Brand      │ ChatThread                                   │
+│   (project   │   • task 제목 헤더                           │
+│    Name)     │   • MessageBubble (user / assistant)         │
+│ • New task   │   • ToolCallCard (tool / tool_result)        │
+│ • Task list  │   • streaming indicator                      │
+│ • Skill (N)  │                                              │
+│ • MCP (N)    │ ChatInput                                    │
+│ • Model      │   • 메시지 입력 · 전송                       │
+│ • Guardrail  │                                              │
+└──────────────┴──────────────────────────────────────────────┘
+        │
+        └── ConfigDrawer (Skill / MCP 다중 선택)
+```
+
+| 영역 | 컴포넌트 | 설명 |
+|------|----------|------|
+| 인증 | `UserIdModal` | User ID 입력 후 쿠키 세션 생성 |
+| 사이드바 | `Sidebar`, `TaskListItem` | 태스크 목록, New task, 핀·이름 변경·삭제 |
+| 설정 | `ConfigDrawer` | Skill·MCP 체크박스 선택 (태스크별) |
+| 채팅 | `ChatThread`, `MessageBubble`, `ChatInput` | 대화 스레드, Markdown·도구 이벤트, 입력 |
+| 스트리밍 | `useChatStream` | SSE 이벤트(`token`, `tool`, `tool_result`, `done`) 처리 |
+
+사이드바 상단 **Brand**와 브라우저 탭 제목은 `config.json`의 `projectName`을 사용합니다. 하이픈(`-`)은 공백으로 바꾸고 첫 글자만 대문자로 표시합니다. (예: `power-runtime` → `Power runtime`)
+
+### 프론트엔드 디렉터리 (`application/web/`)
+
+```text
+application/web/
+├── index.html
+├── package.json
+├── vite.config.ts
+├── src/
+│   ├── main.tsx              # React 진입점
+│   ├── App.tsx               # 세션·태스크·채팅 상태 관리
+│   ├── api.ts                # /api/* fetch·SSE 클라이언트
+│   ├── types.ts              # Task, Message, AppConfig 타입
+│   ├── formatBrandTitle.ts   # projectName → Brand/탭 제목
+│   ├── hooks/
+│   │   └── useChatStream.ts  # 채팅 SSE 스트림 훅
+│   ├── components/
+│   │   ├── UserIdModal.tsx
+│   │   ├── Sidebar.tsx
+│   │   ├── TaskListItem.tsx
+│   │   ├── ConfigDrawer.tsx
+│   │   ├── ChatThread.tsx
+│   │   ├── MessageBubble.tsx
+│   │   ├── ChatInput.tsx
+│   │   └── ToolCallCard.tsx
+│   └── styles/
+│       └── agent.css
+└── dist/                     # npm run build 결과 (server.py가 서빙)
+```
+
+### REST / SSE API
 
 | Method | Path | 설명 |
 |--------|------|------|
 | `GET` | `/api/health` | 헬스체크 |
 | `GET`/`POST` | `/api/session` | User ID 세션 조회·생성 (Cookie) |
 | `GET` | `/api/config` | Skill·MCP·Model 목록 및 기본값 |
+| `PATCH` | `/api/config/defaults` | 기본 Skill·MCP 저장 |
 | `GET`/`POST` | `/api/tasks` | 태스크 목록·생성 (`runtime_session_id` 발급) |
 | `GET`/`PATCH`/`DELETE` | `/api/tasks/{id}` | 태스크 조회·수정·삭제 |
 | `GET` | `/api/tasks/{id}/messages` | 태스크 메시지 목록 |
@@ -416,31 +486,85 @@ Web UI는 **FastAPI 백엔드 + React SPA**로 구성됩니다. ECS(또는 로�
 
 채팅 요청은 `agentcore_client.run_agent` → AgentCore Runtime으로 전달되며, 태스크마다 고유한 `runtime_session_id`로 checkpoint가 격리됩니다.
 
-#### Local 빌드
+### Local 빌드
+
+로컬에서 `application/`(Web UI + FastAPI)을 수정한 뒤 빌드·실행하는 방법입니다. 프로덕션과 동일하게 **빌드된 React 정적 파일**(`application/web/dist/`)을 `application/server.py`가 함께 서빙합니다.
+
+#### 사전 준비
+
+- **Python 3** + 가상환경(권장)
+- **Node.js 18+** 및 `npm` (프론트엔드 빌드)
+- AgentCore Runtime 호출을 위한 **AWS 자격 증명** (`aws configure` 또는 환경 변수). 상세는 [Local에서 실행하기](#local에서-실행하기) 참조.
 
 ```text
 # 저장소 루트에서
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+```
 
-# 프론트엔드 빌드 (UI 수정 후)
+#### 1) 프론트엔드 빌드 (UI 수정 후)
+
+`application/web/src/` 등 React·CSS를 변경했다면 **반드시** 다시 빌드합니다. 빌드 결과는 `application/web/dist/`에 생성되며, `server.py`가 이 경로를 읽습니다.
+
+```text
 cd application/web
-npm install
-npm run build
+npm install          # 최초 1회 또는 package.json 변경 시
+npm run build        # tsc + vite build → dist/
 cd ../..
+```
 
-# 백엔드 실행
+빌드만 다시 하고 서버는 그대로 두는 경우에도, 브라우저에서 **강력 새로고침**(캐시 무시)을 하거나 시크릿 창으로 확인하는 것이 좋습니다.
+
+#### 2) 백엔드 실행
+
+`routes_chat.py`, `agentcore_client.py` 등 Python 코드를 수정했다면 서버를 **재시작**해야 반영됩니다.
+
+```text
+# 저장소 루트에서 (venv 활성화 상태)
 uvicorn application.server:app --host 0.0.0.0 --port 8501
 ```
 
-브라우저: [http://localhost:8501](http://localhost:8501). UI만 빠르게 볼 때는 `cd application/web && npm run dev` (API는 `8501`로 프록시).
+브라우저에서 [http://localhost:8501](http://localhost:8501) 로 접속합니다. 최초 진입 시 User ID를 입력하면 HttpOnly 쿠키로 세션이 유지됩니다.
 
 | 확인 항목 | URL / 방법 |
 |-----------|------------|
 | 헬스체크 | `GET http://localhost:8501/api/health` |
-| UI 미빌드 시 | `Frontend not built` — `npm run build` 후 서버 재시작 |
+| UI 미빌드 시 | `Frontend not built` — 위 1) 단계 실행 후 서버 재시작 |
 | 태스크·메시지 DB | `application/data/tasks.db` (SQLite) |
+
+#### 3) (선택) 프론트엔드만 핫 리로드
+
+UI만 빠르게 볼 때는 Vite 개발 서버를 쓸 수 있습니다. `/api`는 `vite.config.ts`에서 `8501`로 프록시되므로 **백엔드는 별도 터미널에서 실행**해야 합니다.
+
+```text
+# 터미널 1 — API
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+
+# 터미널 2 — UI (소스 수정 시 자동 반영)
+cd application/web
+npm run dev
+```
+
+개발 서버 주소: [http://localhost:5173](http://localhost:5173)
+
+#### 수정 범위별 체크리스트
+
+| 수정 위치 | 필요 작업 |
+|-----------|-----------|
+| `application/web/src/**` | `npm run build` (또는 `npm run dev`) |
+| `application/api/**`, `application/*.py` | `uvicorn` **재시작** |
+| `application/web/dist/`만 배포·확인 | 빌드 후 서버 재시작 불필요(정적 파일만 갱신 시 재시작 권장) |
+| `runtime_agent/langgraph/**` (에이전트 로직) | Docker 이미지 재빌드 + AgentCore Runtime 재배포 ([LangGraph Agent](#runtime_agentlanggraph--langgraph-agent-agentcore-runtime) 참조). Web UI만으로는 반영되지 않음 |
+
+#### 한 번에 빌드 후 실행 (요약)
+
+```text
+cd application/web && npm install && npm run build
+cd ../..
+source .venv/bin/activate
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+```
 
 ### `runtime_agent/langgraph/` — LangGraph Agent (AgentCore Runtime)
 
