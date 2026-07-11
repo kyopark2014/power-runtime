@@ -1,12 +1,12 @@
 # Power Agent의 AgentCore 배포 및 활용
 
-여기에서는 Streamlit app은 Amazon ECS에 배포하고, Agent는 AgentCore Runtime을 활용해 배포합니다. 
+여기에서는 Web UI(FastAPI + React)를 Amazon ECS에 배포하고, Agent는 AgentCore Runtime을 활용해 배포합니다. 
 
 ## 주요 구현 
 
 ### 전체 Architecture
 
-전체적인 Architecture는 아래와 같습니다. 여기서는 MCP/SKILL를 지원하는 LangGraph agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)를 이용해 배포하고, Amazon ECS에 배포된 streamlit 애플리케이션에서 활용합니다. AWS 인프라는 루트 [installer.py](./installer.py)로 배포하고, LangGraph agent 이미지는 [Dockerfile](./runtime_agent/langgraph/Dockerfile)로 빌드한 뒤 [installer.py](./runtime_agent/langgraph/installer.py)로 AgentCore Runtime에 배포합니다. Streamlit UI는 루트 [Dockerfile](./Dockerfile)로 ECS에 배포하며, Agent 추론은 AgentCore에서 수행합니다. 애플리케이션에서 AgentCore의 runtime을 호출할 때에는 [bedrock-agentcore](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore.html)의 [invoke_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore/client/invoke_agent_runtime.html)을 이용합니다. 이때에 각 agent를 생성할 때에 확인할 수 있는 [agentRuntimeArn](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_Agent.html)을 이용합니다. Agent는 [MCP](https://modelcontextprotocol.io/introduction)을 이용해 RAG, AWS Document, Tavily와 같은 검색 서비스를 활용할 수 있습니다. RAG는 Bedrock Knowledge Base와 S3 Vectors를 사용하며, Agent에 필요한 S3, CloudFront, VPC, ECS, ECR 등의 배포는 루트 [installer.py](./installer.py)로 수행합니다.
+전체적인 Architecture는 아래와 같습니다. 여기서는 MCP/SKILL를 지원하는 LangGraph agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)를 이용해 배포하고, Amazon ECS에 배포된 Web UI 애플리케이션에서 활용합니다. AWS 인프라는 루트 [installer.py](./installer.py)로 배포하고, LangGraph agent 이미지는 [Dockerfile](./runtime_agent/langgraph/Dockerfile)로 빌드한 뒤 [installer.py](./runtime_agent/langgraph/installer.py)로 AgentCore Runtime에 배포합니다. Web UI는 루트 [Dockerfile](./Dockerfile)로 ECS에 배포하며, Agent 추론은 AgentCore에서 수행합니다. 애플리케이션에서 AgentCore의 runtime을 호출할 때에는 [bedrock-agentcore](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore.html)의 [invoke_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore/client/invoke_agent_runtime.html)을 이용합니다. 이때에 각 agent를 생성할 때에 확인할 수 있는 [agentRuntimeArn](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_Agent.html)을 이용합니다. Agent는 [MCP](https://modelcontextprotocol.io/introduction)을 이용해 RAG, AWS Document, Tavily와 같은 검색 서비스를 활용할 수 있습니다. RAG는 Bedrock Knowledge Base와 S3 Vectors를 사용하며, Agent에 필요한 S3, CloudFront, VPC, ECS, ECR 등의 배포는 루트 [installer.py](./installer.py)로 수행합니다.
 
 <img width="1000" alt="image" src="https://github.com/user-attachments/assets/3a4bea0c-edb3-4eb5-8f2b-a071f03fd6d3" />
 
@@ -14,23 +14,22 @@ AgentCore의 runtime은 배포를 위해 Docker를 이용합니다. 현재(2025.
  
 ### Operation Architecture
 
-Streamlit UI(`application/app.py`)에서 MCP·Skill·모델·대화 모드를 선택하면 `application/agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 요청을 보냅니다. Runtime은 `runtime_agent/langgraph/agent.py`의 `BedrockAgentCoreApp` 엔트리포인트에서 LangGraph 워크플로우를 실행하고, 선택된 MCP는 `runtime_agent/langgraph/mcp_config.py`에 따라 **동일 컨테이너 내 stdio 서브프로세스**로 기동됩니다. Skill은 `runtime_agent/langgraph/skills/`의 `SKILL.md`와 `get_skill_instructions` 도구로 제공되며, MCP와는 별도 체계입니다.
+Web UI(`application/server.py`, `application/web/`)에서 MCP·Skill·모델을 선택하면 `application/agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 요청을 보냅니다. New task마다 별도 `runtimeSessionId`로 checkpoint가 격리됩니다. Runtime은 `runtime_agent/langgraph/agent.py`의 `BedrockAgentCoreApp` 엔트리포인트에서 LangGraph 워크플로우를 실행하고, 선택된 MCP는 `runtime_agent/langgraph/mcp_config.py`에 따라 **동일 컨테이너 내 stdio 서브프로세스** 또는 **원격 AgentCore MCP(aws-tavily)** 로 기동됩니다. Skill은 `runtime_agent/langgraph/skills/`의 `SKILL.md`와 `get_skill_instructions` 도구로 제공되며, MCP와는 별도 체계입니다.
 
 ```mermaid
 flowchart TB
-  subgraph UI["Streamlit app.py"]
-    MODE["Mode: Agent or Agent Chat"]
-    SEL["Select MCP Skill Model"]
+  subgraph UI["Web UI server.py + React"]
+    TASK["New task / Task list"]
+    SEL["Select MCP Skill Model Guardrail"]
   end
 
   subgraph Client["agentcore_client.py"]
     RA[run_agent]
-    RD["run_agent_in_docker local"]
   end
 
   subgraph Runtime["AgentCore runtime_agent/langgraph"]
     AG["agent.py BedrockAgentCoreApp"]
-    CHAT["chat.py AsyncSqliteSaver bind_memory"]
+    CHAT["chat.py AsyncSqliteSaver restore/persist"]
     LGA["langgraph_agent.py StateGraph astream"]
   end
 
@@ -71,9 +70,8 @@ flowchart TB
     S3[(S3)]
   end
 
-  MODE --> RA
+  TASK --> RA
   SEL --> RA
-  RD -.-> AG
 
   RA --> AG
   AG --> CHAT
@@ -96,18 +94,17 @@ flowchart TB
 
 | 모드 | 모듈 | 설명 |
 |------|------|------|
-| **Agent** | `application/app.py` → `agentcore_client.run_agent` | 단일 턴 Agent. `history_mode=Disable`로 매 요청을 독립 처리 |
-| **Agent (Chat)** | `application/app.py` → `agentcore_client.run_agent` | 대화 이력 유지. `history_mode=Enable`로 세션 기반 interactive 대화 |
+| **Agent (Chat)** | `application/server.py` → `agentcore_client.run_agent` | 태스크별 `runtimeSessionId`로 대화 이력(checkpoint) 유지 |
 | LangGraph Runtime | `runtime_agent/langgraph/agent.py` | LangGraph StateGraph + `MultiServerMCPClient` + 내장 도구 |
 | Skill | `runtime_agent/langgraph/skill.py` · `runtime_agent/langgraph/skills/` | `SKILL.md` 기반 지침. UI `application/skills.list`에서 선택 후 `get_skill_instructions`로 로드 |
-| MCP (로컬 stdio) | `runtime_agent/langgraph/mcp_server_*.py` | Agent 컨테이너 안에서 subprocess로 기동 (`runtime_agent/langgraph/mcp_config.py`가 command/args 정의) |
-| Streamlit 앱 | 루트 `Dockerfile` → ECS | Streamlit용 최소 패키지. Agent 추론은 AgentCore에서 수행 |
+| MCP (로컬 stdio / 원격) | `mcp_config.py`, `mcp_server_*.py`, aws-tavily Runtime | stdio subprocess 또는 AgentCore 원격 MCP |
+| Web UI | 루트 `Dockerfile` → ECS | FastAPI + React SPA. Agent 추론은 AgentCore에서 수행 |
 
-UI에서 MCP는 `application/mcp.list` 기준으로 `tavily`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `사용자 설정`을 체크박스로 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator` 등을 별도로 선택합니다. 로컬 개발 시에는 `application/agentcore_client.py`의 `run_agent_in_docker`로 `runtime_agent/langgraph/Dockerfile` 이미지(`localhost:8080`)에 직접 요청할 수 있습니다.
+UI에서 MCP는 `application/mcp.list` 기준으로 `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `tavily`, `aws-tavily`, `image generation`, `korea_weather`, `사용자 설정` 등을 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator` 등을 별도로 선택합니다. UI는 `agentcore_client.run_agent`로 AgentCore Runtime에 직접 요청합니다.
 
 ### 네트워크 설정
 
-`power-runtime`은 **ECS(Streamlit UI)** 와 **AgentCore Runtime(LangGraph 서버)** 가 모두 **private subnet** 에 배포됩니다. 이 환경에서는 인터넷으로 직접 나가지 않으므로, AWS API 호출은 **VPC Interface/Gateway Endpoint** 로, 외부 MCP·npm·cross-region 트래픽은 **NAT Gateway** 로 egress 를 열어야 합니다.
+`power-runtime`은 **ECS(Web UI)** 와 **AgentCore Runtime(LangGraph 서버)** 가 모두 **private subnet** 에 배포됩니다. 이 환경에서는 인터넷으로 직접 나가지 않으므로, AWS API 호출은 **VPC Interface/Gateway Endpoint** 로, 외부 MCP·npm·cross-region 트래픽은 **NAT Gateway** 로 egress 를 열어야 합니다.
 
 [installer.py](./installer.py) 가 신규 VPC 생성뿐 아니라 **기존 VPC 재사용 시**에도 아래 리소스를 자동으로 맞춥니다.
 
@@ -352,31 +349,98 @@ if "text/event-stream" in response.get("contentType", ""):
 
 ## 코드 구조
 
-프로젝트는 **Streamlit UI(`application/`)** 와 **LangGraph Agent Runtime(`runtime_agent/langgraph/`)** 으로 나뉩니다. UI는 ECS에서 사용자 입력·MCP/Skill 선택·스트리밍 결과 표시만 담당하고, Agent 추론·MCP·Skill 실행은 AgentCore Runtime 컨테이너에서 수행합니다.
+프로젝트는 **Codex형 Web UI(`application/`)** 와 **LangGraph Agent Runtime(`runtime_agent/langgraph/`)** 으로 나뉩니다. 루트 [installer.py](./installer.py)는 ECS·VPC·Knowledge Base·**S3 Files 세션 스토리지**를 배포하고, [runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)는 AgentCore Runtime·ECR·IAM을 배포합니다. UI는 ECS에서 사용자 입력·MCP/Skill·모델 선택과 스트리밍 결과 표시만 담당하고, LLM 추론·MCP·Skill 실행·대화 checkpoint 저장은 AgentCore Runtime 컨테이너에서 수행합니다.
 
-### `application/` — Streamlit UI (ECS)
+```text
+Web UI (ECS)                            AgentCore Runtime
+application/server.py                   runtime_agent/langgraph/agent.py
+application/web/ (React)                        │
+        │                                         ▼
+        ▼                                 langgraph_agent.py
+application/agentcore_client.py  ──SSE──▶  chat.py · skill.py · mcp_config.py
+  invoke_agent_runtime
+```
 
-루트 [Dockerfile](./Dockerfile)로 빌드되어 ECS에 배포됩니다. AgentCore Runtime을 `invoke_agent_runtime`으로 호출하며, Agent 로직은 포함하지 않습니다.
+### `application/` — Codex형 Web UI (ECS)
+
+루트 [Dockerfile](./Dockerfile)로 빌드되어 ECS에 배포됩니다. FastAPI + React SPA이며, AgentCore Runtime을 `invoke_agent_runtime`으로 호출합니다.
 
 ```text
 application/
-├── app.py                  # Streamlit 진입점. 모드·MCP·Skill·모델 선택, 채팅 UI
+├── server.py               # FastAPI 진입점, SPA 정적 파일 서빙
+├── task_store.py           # 태스크·메시지 SQLite 저장
+├── api/                    # REST + SSE API
+├── web/                    # React + Vite 프론트엔드
 ├── agentcore_client.py     # AgentCore Runtime 호출 (invoke_agent_runtime, SSE 파싱)
-├── chat.py                 # UI 세션·대화 상태 관리
+├── chat.py                 # UI 측 모델 선택 상태
+├── info.py                 # Bedrock/OpenAI 모델 ID·리전·Mantle API 매핑
 ├── utils.py                # config.json 로드, 공통 유틸
-├── notification_queue.py   # 도구 호출·스트리밍 알림 큐
-├── info.py                 # 앱 메타 정보
+├── notification_queue.py   # SSE 스트리밍 알림 큐
 ├── bedrock_data_retention.py
-├── mcp.list                # UI MCP 체크박스 목록 (Runtime의 mcp.list와 대응)
-├── skills.list             # UI Skill 체크박스 목록 (Runtime의 skills.list와 대응)
-└── config.json             # region, projectName, agentRuntimeArn 등 (배포 시 생성)
+├── mcp.list
+├── skills.list
+└── config.json
 ```
 
 | 파일 | 역할 |
 |------|------|
-| `app.py` | Agent / Agent (Chat) 모드, MCP·Skill·모델 선택 후 `agentcore_client.run_agent` 호출 |
-| `agentcore_client.py` | payload(prompt, mcp_servers, skill_list, history_mode)를 Runtime으로 전송하고 SSE 스트림 처리 |
-| `mcp.list` · `skills.list` | UI에 노출할 MCP·Skill 이름 목록. 선택값은 Runtime payload로 전달됨 |
+| `server.py` | FastAPI 앱, `/api/*` REST·SSE, React SPA 서빙 |
+| `task_store.py` | New task별 `runtime_session_id`·UI 메시지 영속 |
+| `agentcore_client.py` | payload를 Runtime으로 전송, SSE 스트림 처리. 태스크별 `runtime_session_id` 지원 |
+| `web/` | Codex형 사이드바(New task, Skill, MCP, Model) + 채팅 UI |
+
+### App UI
+
+Web UI는 **FastAPI 백엔드 + React SPA**로 구성됩니다. ECS(또는 로컬 `8501`)에서 `application/server.py`가 API와 빌드된 정적 파일(`application/web/dist/`)을 함께 제공합니다.
+
+| 구분 | 기술 | 용도 |
+|------|------|------|
+| **백엔드** | FastAPI, uvicorn | REST API, SSE 스트리밍, SPA 정적 파일 서빙 |
+| **백엔드** | SQLite (`task_store.py`) | User별 task·메시지·`runtime_session_id` 영속 |
+| **백엔드** | `agentcore_client.py` | AgentCore Runtime `invoke_agent_runtime` 호출 |
+| **프론트엔드** | React 19, TypeScript | SPA UI |
+| **프론트엔드** | Vite 6 | 개발 서버·프로덕션 빌드 |
+| **인증** | HttpOnly Cookie (`agent_user_id`) | User ID 세션 유지 |
+
+#### REST / SSE API
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `GET` | `/api/health` | 헬스체크 |
+| `GET`/`POST` | `/api/session` | User ID 세션 조회·생성 (Cookie) |
+| `GET` | `/api/config` | Skill·MCP·Model 목록 및 기본값 |
+| `GET`/`POST` | `/api/tasks` | 태스크 목록·생성 (`runtime_session_id` 발급) |
+| `GET`/`PATCH`/`DELETE` | `/api/tasks/{id}` | 태스크 조회·수정·삭제 |
+| `GET` | `/api/tasks/{id}/messages` | 태스크 메시지 목록 |
+| `POST` | `/api/tasks/{id}/chat` | 채팅 SSE 스트림 (`data: {...}`) |
+
+채팅 요청은 `agentcore_client.run_agent` → AgentCore Runtime으로 전달되며, 태스크마다 고유한 `runtime_session_id`로 checkpoint가 격리됩니다.
+
+#### Local 빌드
+
+```text
+# 저장소 루트에서
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 프론트엔드 빌드 (UI 수정 후)
+cd application/web
+npm install
+npm run build
+cd ../..
+
+# 백엔드 실행
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+```
+
+브라우저: [http://localhost:8501](http://localhost:8501). UI만 빠르게 볼 때는 `cd application/web && npm run dev` (API는 `8501`로 프록시).
+
+| 확인 항목 | URL / 방법 |
+|-----------|------------|
+| 헬스체크 | `GET http://localhost:8501/api/health` |
+| UI 미빌드 시 | `Frontend not built` — `npm run build` 후 서버 재시작 |
+| 태스크·메시지 DB | `application/data/tasks.db` (SQLite) |
 
 ### `runtime_agent/langgraph/` — LangGraph Agent (AgentCore Runtime)
 
@@ -521,7 +585,7 @@ def patched_init(self, *args, **kwargs):
     original_init(self, *args, **kwargs)
 ```
 
-Streamlit에서 입력하면 AgentCore endpoint로 전달되는데 이때에 아래와 같이 BedrockAgentCoreApp의 entrypoint로 받아서 실행합니다.
+Web UI에서 입력하면 AgentCore endpoint로 전달되는데 이때에 아래와 같이 BedrockAgentCoreApp의 entrypoint로 받아서 실행합니다.
 
 ```python
 import httpx
@@ -563,91 +627,111 @@ async def agent_langgraph(payload):
 
 ## Session Storage
 
-AgentCore Runtime에서 대화 context를 유지하려면 **Session Storage**를 사용합니다. `create_agent_runtime` 시 `filesystemConfigurations`에 `sessionStorage`를 설정하면, `invoke_agent_runtime`의 **`runtimeSessionId`마다** 컨테이너에 임시 디스크가 마운트됩니다. 이 프로젝트에서는 LangGraph checkpointer가 해당 경로의 SQLite 파일에 대화 이력을 저장합니다.
+AgentCore Runtime에서 대화 context를 유지하려면 **Session Storage**를 사용합니다. 이 프로젝트는 배포 후에도 checkpoint를 유지하기 위해 **Amazon S3 Files**를 `/mnt/workspace`에 마운트하고, LangGraph **AsyncSqliteSaver**가 태스크(`runtime_session_id`)별 SQLite 파일에 대화 이력을 저장합니다. (`s3_files_access_point_arn`이 없으면 managed `sessionStorage` + `PUBLIC` 모드로 fallback합니다.)
 
-### Runtime 생성 시 sessionStorage 설정
+런타임 중에는 NFS/S3 Files 잠금을 피하기 위해 **로컬 working DB**(`/tmp/langgraph-checkpoints/{runtime_session_id}/`)에서 읽고 쓰고, 요청 종료 시 **영속 경로**(`/mnt/workspace/checkpoints/{runtime_session_id}/`)로 복사합니다.
 
-[runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)에서 runtime을 생성할 때 아래와 같이 `/mnt/workspace`를 마운트합니다. (`/mnt/` 하위 경로 필수)
+### Runtime 생성 시 filesystem 설정
+
+[runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)의 `create_agent_runtime_func()` / `update_agent_runtime_func()`에서 runtime을 생성·갱신할 때 `/mnt/workspace`를 마운트합니다. (`/mnt/` 하위 경로 필수)
+
+#### S3 Files를 이용하는 경우 (기본)
+
+- **기본 (S3 Files)**: `s3FilesAccessPoint` + `networkMode: VPC`
+- **fallback**: `sessionStorage` + `networkMode: PUBLIC` (`s3_files_access_point_arn` 없을 때)
 
 ```python
-client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
-
 response = client.create_agent_runtime(
     agentRuntimeName=runtime_name,
     agentRuntimeArtifact={
-        'containerConfiguration': {
-            'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
+        "containerConfiguration": {
+            "containerUri": f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
         }
     },
     filesystemConfigurations=[
         {
-            "sessionStorage": {
-                "mountPath": "/mnt/workspace"
+            "s3FilesAccessPoint": {
+                "accessPointArn": config["s3_files_access_point_arn"],
+                "mountPath": "/mnt/workspace",
             }
         }
     ],
-    networkConfiguration={"networkMode": "PUBLIC"},
-    roleArn=agent_runtime_role
+    networkConfiguration={
+        "networkMode": "VPC",
+        "networkModeConfig": {
+            "subnets": config["agent_runtime_vpc_subnets"],
+            "securityGroups": config["agent_runtime_security_groups"],
+        },
+    },
+    roleArn=config["agent_runtime_role"],
 )
 ```
+
+`update_agent_runtime`에도 **동일한** `filesystemConfigurations`와 `networkConfiguration`을 포함해야 합니다.
 
 ### LangGraph checkpointer 연동
 
-기존 `MemorySaver`는 프로세스 메모리에만 저장되어 컨테이너가 재시작되면 history가 사라집니다. `history_mode=Enable`일 때 [runtime_agent/langgraph/chat.py](./runtime_agent/langgraph/chat.py)의 `ensure_checkpointer()`가 **AsyncSqliteSaver**를 초기화하고, `buildChatAgentWithHistory()`가 이를 checkpointer로 사용합니다.
+기존 `MemorySaver`는 프로세스 메모리에만 저장되어 컨테이너가 재시작되면 history가 사라집니다. [runtime_agent/langgraph/chat.py](./runtime_agent/langgraph/chat.py)의 `ensure_checkpointer()`가 **AsyncSqliteSaver**를 초기화하고, `buildChatAgentWithHistory()`가 이를 checkpointer로 사용합니다.
+
+#### 2-tier checkpoint (working + persistent)
+
+| 구분 | 경로 | 역할 |
+|------|------|------|
+| **Working (런타임)** | `/tmp/langgraph-checkpoints/{runtime_session_id}/langgraph_checkpoints.sqlite` | invoke 처리 중 LangGraph가 읽고 쓰는 DB |
+| **Persistent (영속)** | `/mnt/workspace/checkpoints/{runtime_session_id}/langgraph_checkpoints.sqlite` | microVM stop/resume·cold start 후 복원용 |
+| **Legacy (session_id 없음)** | `/mnt/workspace/langgraph_checkpoints.sqlite` | `runtime_session_id` 미전달 시 폴백 |
 
 | 구분 | Strands (참고) | LangGraph (본 프로젝트) |
 |------|----------------|-------------------------|
-| 저장소 | `FileSessionManager(storage_dir="/mnt/workspace")` | `AsyncSqliteSaver` → `/mnt/workspace/langgraph_checkpoints.sqlite` |
-| 세션 키 | `session_id` | `config["configurable"]["thread_id"]` |
+| 저장소 | `FileSessionManager(storage_dir="/mnt/workspace")` | AsyncSqliteSaver (working `/tmp/...` + persistent `/mnt/workspace/checkpoints/...`) |
+| 세션 키 | `session_id` | `config["configurable"]["thread_id"]` = 태스크 `runtime_session_id` |
 
 ```python
 # chat.py — 요약
-SESSION_STORAGE_DIR = os.environ.get("SESSION_STORAGE_DIR", "/mnt/workspace")
-CHECKPOINT_DB = os.path.join(SESSION_STORAGE_DIR, "langgraph_checkpoints.sqlite")
-
 async def ensure_checkpointer():
-    saver = AsyncSqliteSaver.from_conn_string(CHECKPOINT_DB)
-    checkpointer = await saver.__aenter__()
-    await checkpointer.setup()
-    return checkpointer
+    _restore_from_session_storage(working_db)  # 영속 → working 복원
+    # 기존 DB 있으면 open, 없으면 setup 후 initialize
+
+async def persist_checkpoint_to_session_storage():
+    # WAL flush 후 working → persistent 복사 (요청 종료 시)
 ```
 
-`buildChatAgentWithHistory()`는 아래와 같이 checkpointer를 compile 시 전달합니다.
+[runtime_agent/langgraph/agent.py](./runtime_agent/langgraph/agent.py)는 요청 시작 시 payload의 `runtime_session_id`로 세션을 바인딩하고, `finally`에서 영속화합니다.
 
 ```python
-return workflow.compile(
-    checkpointer=chat.checkpointer
-)
+chat.set_checkpoint_session_id(runtime_session_id)
+app, config = await chat.create_agent(..., runtime_session_id=runtime_session_id)
+try:
+    async for stream in app.astream(inputs, config, stream_mode="messages"):
+        ...
+finally:
+    chat.set_checkpoint_session_id(None)
+    await chat.persist_checkpoint_to_session_storage()
 ```
-
-
 
 ### 클라이언트 runtimeSessionId
 
-Streamlit 클라이언트([application/agentcore_client.py](./application/agentcore_client.py))는 history 모드에서 **user_id 기반 고정 `runtimeSessionId`**를 사용합니다. 같은 사용자가 재접속해도 동일한 `/mnt/workspace`가 붙어 SQLite checkpoint를 이어서 읽을 수 있습니다.
+Web UI([application/task_store.py](./application/task_store.py))는 **태스크 생성 시 `runtime_session_id`(UUID)** 를 발급하고, [application/agentcore_client.py](./application/agentcore_client.py)가 `invoke_agent_runtime` 호출마다 동일 ID를 전달합니다.
 
 ```python
-def runtime_session_id_for(user_id: str, history_mode: str) -> str:
-    if history_mode == "Enable" and user_id:
-        seed = f"agentcore-session-{user_id}"
-        session_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
-    else:
-        session_id = str(uuid.uuid4())
-    return session_id
+# task_store.py — create_task()
+runtime_session_id = str(uuid.uuid4())
 ```
 
 ```mermaid
 sequenceDiagram
-    participant UI as Streamlit
+    participant UI as Web UI
     participant Client as agentcore_client
     participant AC as AgentCore Runtime
     participant LG as LangGraph
 
-    UI->>Client: history_mode=Enable, user_id
-    Client->>AC: invoke(runtimeSessionId=uuid5(user_id))
+    UI->>Client: task.runtime_session_id, user_id
+    Client->>AC: invoke(runtimeSessionId=task.runtime_session_id)
     Note over AC: /mnt/workspace 마운트
-    AC->>LG: astream(..., thread_id=user_id:scope)
-    LG->>LG: AsyncSqliteSaver → langgraph_checkpoints.sqlite
+    AC->>LG: set_checkpoint_session_id + ensure_checkpointer
+    LG->>LG: persistent → /tmp working DB 복원
+    AC->>LG: astream(..., thread_id=runtime_session_id)
+    AC->>LG: persist_checkpoint_to_session_storage
     Client->>AC: 다음 턴 (동일 runtimeSessionId)
     LG->>LG: thread_id로 이전 checkpoint 로드
 ```
@@ -656,76 +740,31 @@ sequenceDiagram
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `SESSION_STORAGE_DIR` | `/mnt/workspace` | checkpoint SQLite 디렉터리 |
-| `SESSION_STORAGE_ENABLED` | `true` | `false`이면 `MemorySaver`로 폴백 |
-
-로컬에서 session storage 없이 실행할 때는 `SESSION_STORAGE_DIR`이 없으면 `runtime_agent/langgraph/.session_storage`를 사용합니다.
+| `SESSION_STORAGE_DIR` | `/mnt/workspace` (마운트 시) | 영속 checkpoint 디렉터리 루트 (`checkpoints/{session_id}/` 하위) |
 
 ### 주의사항
 
-- **세션 범위**: `/mnt/workspace`는 `runtimeSessionId` 수명에 묶인 **임시 저장소**입니다. 일반적으로 세션이 종료되면 데이터가 사라지지만, AgentCore를 사용할 경우에는 14일간 보관이 됩니다. 추가 입력이 있을 경우에 기간은 다시 14일로 갱신됩니다. 세션당 최대 1MB까지 저장합니다. 다른 방법으로 S3, DynamoDB, RDS 등을 별도로 설정할 수 있습니다.
-- **요청마다 agent 재생성**: `agent.py`는 매 요청 `create_agent()`를 호출하지만, checkpointer가 파일에 있으면 `thread_id`만 같으면 history를 복원합니다.
-- **`InMemoryStore`는 휘발성**: `store=chat.memorystore`는 LangGraph Store API용이며 메모리에만 있습니다. 대화 history만 필요하면 checkpointer만으로 충분합니다.
+- **태스크별 격리**: Web UI 태스크마다 `runtime_session_id`(UUID)가 다르므로 checkpoint 파일도 `checkpoints/{runtime_session_id}/` 아래로 분리됩니다.
+- **요청마다 agent 재생성**: `agent.py`는 매 요청 `create_agent()`를 호출하지만, `ensure_checkpointer()`가 working DB를 열고 `thread_id`가 같으면 history를 복원합니다.
+- **요청 종료 시 persist 필수**: `persist_checkpoint_to_session_storage()`가 호출되어야 cold start 후 `/mnt/workspace`에서 복원됩니다.
+- **Runtime 재배포**: AgentCore Runtime 이미지를 갱신하지 않으면 UI만 바뀌어도 checkpoint가 동작하지 않을 수 있습니다. `runtime_agent/langgraph/installer.py`로 Runtime을 재배포하세요.
 - **의존성**: [runtime_agent/langgraph/Dockerfile](./runtime_agent/langgraph/Dockerfile)에 `langgraph-checkpoint-sqlite`, `aiosqlite`가 포함되어 있습니다.
-
-
-
-
 
 ### 세션 관리
 
-AgentCore Runtime에서 대화 history를 유지하려면 **managed session storage**(`filesystemConfigurations.sessionStorage`)와 **동일한 `runtimeSessionId`**, 그리고 LangGraph **checkpointer**(SQLite)가 함께 동작해야 합니다. 상세 구현은 위 [Session Storage](#session-storage) 절을 참조합니다.
+AgentCore Runtime에서 대화 history를 유지하려면 **`/mnt/workspace` 영속 마운트**(S3 Files 또는 managed `sessionStorage`), **동일한 `runtimeSessionId`**, LangGraph **checkpointer**(working `/tmp` + persistent SQLite)가 함께 동작해야 합니다.
 
-#### sessionStorage (managed session storage)
+본 프로젝트는 `/mnt/workspace/checkpoints/{runtime_session_id}/langgraph_checkpoints.sqlite`에 LangGraph checkpoint를 영속 저장합니다. cold start 후 `ensure_checkpointer()` 로그가 `SQLite checkpointer opened (existing)`이면 복원 성공, `initialized`이면 **새 DB 생성(이전 history 없음)** 입니다.
 
-[AWS 문서](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html)에 따르면, `sessionStorage`는 **runtimeSessionId마다** 격리된 persistent 디렉터리(`/mnt/workspace` 등)를 제공합니다. agent가 일반 파일 I/O로 쓴 내용은 서비스가 durable storage에 비동기 복제하고, microVM이 stop/resume(cold start)되어도 **같은 `runtimeSessionId`로 invoke하면** 파일 상태가 복원됩니다.
-
-| 항목 | 내용 |
-|------|------|
-| 설정 위치 | `create_agent_runtime` / `update_agent_runtime`의 `filesystemConfigurations` |
-| mount path | `/mnt/` 하위 1단계 필수 (예: `/mnt/workspace`) |
-| 세션 격리 | `runtimeSessionId`마다 별도 storage (세션 간 공유 불가) |
-| session당 용량 | 최대 1 GB |
-| idle 만료 | **14일**간 invoke 없으면 데이터 삭제 |
-| version 업데이트 | **agent runtime version 변경 시 session data 초기화** |
-
-**stop/resume lifecycle (AWS):**
-
-1. 첫 invoke — microVM 생성, mount path는 빈 디렉터리
-2. agent write — 로컬 파일 시스템에 쓰기, durable storage로 비동기 복제
-3. session stop — microVM 종료, 미 flush 데이터는 graceful shutdown 시 flush
-4. 같은 session resume — 새 microVM에 storage 복원
-
-본 프로젝트는 `/mnt/workspace/langgraph_checkpoints.sqlite`에 LangGraph checkpoint를 저장합니다. cold start 후 `ensure_checkpointer()` 로그가 `opened (existing)`이면 복원 성공, `initialized`이면 **새 DB 생성(이전 history 없음)** 입니다.
-
-> **중요:** Dockerfile의 `ENV SESSION_STORAGE_DIR=/mnt/workspace`만으로는 영속 storage가 활성화되지 않습니다. **반드시** runtime API에 `filesystemConfigurations.sessionStorage`를 설정해야 합니다. `create_agent_runtime`뿐 아니라 **`update_agent_runtime`에도 동일하게 포함**해야 합니다. update 시 누락하면 `get-agent-runtime` 응답에 `filesystemConfigurations`가 없고, cold start마다 checkpoint가 사라집니다.
-
-#### maxLifetime · idleRuntimeSessionTimeout (lifecycle)
-
-[Lifecycle settings](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-lifecycle-settings.html)의 **8시간**은 checkpoint **데이터 보관 기간이 아닙니다.** microVM **인스턴스 최대 수명**입니다.
-
-| 설정 | 기본값 | 의미 |
-|------|--------|------|
-| `idleRuntimeSessionTimeout` | 900초 (**15분**) | idle 상태가 이 시간 지속되면 해당 session의 microVM 종료 |
-| `maxLifetime` | 28,800초 (**8시간**) | microVM이 한 번 생성된 뒤 살아 있을 수 있는 **최대 시간** (리셋 불가) |
-
-- idle timeout 도달 → microVM만 종료. sessionStorage가 설정되어 있고 **같은 `runtimeSessionId`**로 다시 invoke하면 storage가 복원되어야 합니다.
-- maxLifetime 도달 → microVM 교체. session 자체는 새 microVM으로 **resume 가능** (문서: *"The session itself can persist beyond this with a new instance provisioned."*)
-- idle timer는 **같은 session에 invoke할 때마다 리셋**됩니다.
-
-#### runtimeSessionId (클라이언트)
-
-[application/agentcore_client.py](./application/agentcore_client.py)의 `runtime_session_id_for()`는 history 모드에서 user_id 기반 **고정 UUID**를 생성합니다. sessionStorage 복원은 **invoke마다 동일한 `runtimeSessionId`**가 전달될 때만 동작합니다.
-
-- history 모드에서 `runtimeSessionId`는 `user_id`만으로 고정 (`agentcore_client.py`)
+[application/task_store.py](./application/task_store.py)가 태스크별 `runtime_session_id`를 발급합니다. sessionStorage 복원은 **같은 태스크에서 invoke마다 동일한 `runtimeSessionId`**가 전달될 때만 동작합니다.
 
 #### 배포·운영 체크리스트
 
-1. `get-agent-runtime`으로 `filesystemConfigurations`에 `sessionStorage` 존재 확인
+1. `get-agent-runtime`으로 `filesystemConfigurations`에 `s3FilesAccessPoint` 또는 `sessionStorage` 존재 확인
 2. create/update 모두 `/mnt/workspace` mount path 포함
-3. history 모드에서 `runtimeSessionId`가 user_id마다 고정인지 확인
-4. runtime **version 업데이트 직후**에는 session data가 wipe됨 (정상 동작)
-5. CloudWatch(`/aws/bedrock-agentcore/runtimes/...`)에서 `checkpointer` 로그로 `initialized` vs `opened (existing)` 확인
+3. 태스크별 `runtimeSessionId`가 create/invoke·payload `runtime_session_id` 전 구간에서 동일한지 확인
+4. Runtime **이미지 갱신 후** checkpoint 동작 재검증 (구버전 Runtime은 `history_mode` 기반이라 기억하지 못함)
+5. CloudWatch에서 `checkpoint bind` / `SQLite checkpointer opened` 로그 확인
 
 #### 참고 문서
 
@@ -736,7 +775,7 @@ AgentCore Runtime에서 대화 history를 유지하려면 **managed session stor
 
 ### Message Trim
 
-LangGraph 에이전트([runtime_agent/langgraph/langgraph_agent.py](./runtime_agent/langgraph/langgraph_agent.py)의 `call_model`)는 LLM 호출 직전에 **HumanMessage 기준 최근 N턴**만 남깁니다. LangGraph state의 `messages`는 checkpointer에 그대로 두고, **모델에 넘기는 메시지만** trim합니다. `history_mode=Enable`/`Disable` 모두 동일하게 적용됩니다.
+LangGraph 에이전트([runtime_agent/langgraph/langgraph_agent.py](./runtime_agent/langgraph/langgraph_agent.py)의 `call_model`)는 LLM 호출 직전에 **HumanMessage 기준 최근 N턴**만 남깁니다. LangGraph state의 `messages`는 checkpointer에 그대로 두고, **모델에 넘기는 메시지만** trim합니다.
 
 **기본값:** `MAX_CONTEXT_TURNS = 5`
 
@@ -793,32 +832,20 @@ def trim_messages_by_human_turns(messages: list, max_turns: int) -> list:
             ...
 ```
 
-에이전트 config는 `chat.py`의 `create_agent()`에서 생성하며, `history_mode`와 관계없이 `max_turns`를 전달합니다.
+에이전트 config는 `chat.py`의 `create_agent()`에서 생성하며, 태스크 `runtime_session_id`를 `thread_id`로 사용합니다.
 
 ```python
 # runtime_agent/langgraph/chat.py — create_agent()
-    if history_mode == "Enable":
-        app = langgraph_agent.buildChatAgentWithHistory(tools)
-        config = {
-            "recursion_limit": 100,
-            "configurable": {
-                "thread_id": thread_id,
-                "tools": tools,
-                "system_prompt": system_prompt,
-            },
-            "max_turns": langgraph_agent.MAX_CONTEXT_TURNS,
-        }
-    else:
-        app = langgraph_agent.buildChatAgent(tools)
-        config = {
-            "recursion_limit": 100,
-            "configurable": {
-                "thread_id": thread_id,
-                "tools": tools,
-                "system_prompt": system_prompt,
-            },
-            "max_turns": langgraph_agent.MAX_CONTEXT_TURNS,
-        }
+    app = langgraph_agent.buildChatAgentWithHistory(tools, checkpointer=active_checkpointer)
+    agent_config = {
+        "recursion_limit": 100,
+        "configurable": {
+            "thread_id": runtime_session_id,
+            "tools": tools,
+            "system_prompt": system_prompt,
+        },
+        "max_turns": langgraph_agent.MAX_CONTEXT_TURNS,
+    }
 ```
 
 **`max_turns=5`의 의미**
@@ -869,7 +896,7 @@ Human(Q2) → AI(A2) → Human(Q3) → AI(tool_calls) → ToolMessage → AI(A3)
 | 연결 방식 | `command` / `args` | `streamable_http` + SigV4 |
 | 리전 | Agent Runtime과 동일 | **`us-east-1` 고정** |
 
-UI의 MCP 체크박스(`application/mcp.list`, `runtime_agent/langgraph/mcp.list`)에 `aws-tavily`가 포함되어 있으며, Agent 모드에서 선택하면 Runtime이 Tavily MCP에 연결합니다.
+UI의 MCP 체크박스(`application/mcp.list`, `runtime_agent/langgraph/mcp.list`)에 `aws-tavily`가 포함되어 있으며, 태스크에서 선택하면 Runtime이 Tavily MCP에 연결합니다.
 
 ### 사전 준비
 
@@ -975,7 +1002,7 @@ Marketplace Tavily MCP 컨테이너가 노출하는 주요 도구입니다.
 ### 활용 방법
 
 1. `runtime_agent/langgraph/installer.py`로 LangGraph Agent Runtime과 aws-tavily Runtime을 배포합니다.
-2. Streamlit UI에서 Agent 모드를 선택하고 MCP 체크박스에서 **`aws-tavily`** 를 선택합니다.
+2. Web UI에서 New task를 생성하고 MCP 체크박스에서 **`aws-tavily`** 를 선택합니다.
 3. 웹 검색이 필요한 질문을 입력하면 Agent가 `tavily_search` 등을 호출합니다.
 
 > **참고:** `tavily`(로컬 stdio)와 `aws-tavily`(원격 AgentCore)는 동시에 선택할 수 있지만, 동일한 `tavily-search` 서버 이름을 사용하므로 **하나만 선택**하는 것을 권장합니다.
@@ -1107,7 +1134,7 @@ python3 installer.py
 ```
 
 
-8. 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. Agent를 선택한 후에 적절한 MCP tool을 선택하여 원하는 작업을 수행합니다.
+8. 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. User ID를 입력한 뒤 New task를 생성하고, 적절한 MCP·Skill을 선택하여 원하는 작업을 수행합니다.
 
 9. 인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다.
 
@@ -1160,10 +1187,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-이후 아래와 같은 명령어로 streamlit을 실행합니다. 
+이후 아래와 같이 Web UI 서버를 실행합니다.
 
 ```text
-streamlit run application/app.py
+cd application/web && npm install && npm run build
+cd ../..
+uvicorn application.server:app --host 0.0.0.0 --port 8501
 ```
 
 
@@ -1293,7 +1322,7 @@ Observability 다음 단계로 [evaluation.py](./runtime_agent/langgraph/evaluat
 Online evaluation은 같은 `session.id`(대개 AgentCore `runtimeSessionId`)의 span을 모은 뒤, **마지막 활동 이후 N분 유휴**하면 세션이 끝난 것으로 보고 평가합니다.
 
 - 기본(서비스): 15분 → 이 프로젝트는 **5분**으로 설정
-- Chat 모드(`history_mode=Enable`)는 user별 `runtimeSessionId`가 고정이라 턴이 한 세션에 계속 쌓임
+- 태스크별 `runtimeSessionId`는 task마다 UUID로 격리되므로, 같은 태스크 내에서 턴이 한 세션에 쌓임
 - timeout이 길면 세션 span이 [한도](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)(**1000 spans / 15 MB**)를 넘어 `ValidationException`이 납니다
 
 에이전트 대화 세션을 끊는 설정이 아니라, **평가용 세션 경계를 나누는 타이머**입니다. 값은 `evaluation.py`의 `DEFAULT_SESSION_TIMEOUT_MINUTES`에서 바꾸며, installer 재실행 시 기존 config를 `update_online_evaluation_config`로 갱신합니다.
@@ -1557,7 +1586,7 @@ response = bedrock_client.create_guardrail(
 
 ### 추론 시 Guardrail 적용
 
-Guardrail 리소스 생성만으로는 모델 호출 시 자동 적용되지 않습니다. Streamlit UI(`application/app.py`)의 **Guardrail 사용** 토글로 on/off를 제어하고, `guardrail_enabled` 값이 AgentCore payload로 Runtime에 전달됩니다.
+Guardrail 리소스 생성만으로는 모델 호출 시 자동 적용되지 않습니다. Web UI 사이드바의 **Guardrail 사용** 토글로 on/off를 제어하고, `guardrail_enabled` 값이 AgentCore payload로 Runtime에 전달됩니다.
 
 모델 종류에 따라 적용 방식이 나뉩니다.
 

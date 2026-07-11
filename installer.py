@@ -4447,8 +4447,8 @@ chown -R ssm-user:ssm-user /home/ssm-user/{git_name}
 
 # Build and run docker with volume mount for config.json
 cd /home/ssm-user/{git_name}
-docker build -f Dockerfile -t streamlit-app .
-docker run -d --restart=always -p 8501:8501 -v $(pwd)/application/config.json:/app/application/config.json --name app streamlit-app
+docker build -f Dockerfile -t agent-ui .
+docker run -d --restart=always -p 8501:8501 -v $(pwd)/application/config.json:/app/application/config.json --name app agent-ui
 
 # Make update.sh executable for manual execution via SSM
 chmod a+rx update.sh
@@ -5780,7 +5780,7 @@ def main():
         app_environment = apply_s3_files_config(app_environment, s3_files_info)
         if write_application_config(app_environment):
             logger.info("Local testing is available while deployment continues:")
-            logger.info("  streamlit run application/app.py")
+            logger.info("  uvicorn application.server:app --host 0.0.0.0 --port 8501")
 
         # LangGraph agent runtime (MCP servers run in-process inside this container;
         # separate runtime_mcp installers are not used in this repository).
