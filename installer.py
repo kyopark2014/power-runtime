@@ -4034,8 +4034,18 @@ def build_and_push_docker_image(
     logger.info(f"  Docker platform: {docker_platform} (native ARM64 build, no QEMU)")
     logger.info(f"  Starting Docker build: {image_uri}")
     logger.info("  Build output streams below (this may take several minutes)...")
+    # Disable BuildKit attestations: default provenance/SBOM create an OCI index
+    # whose attestation entries lack platform metadata, causing ECR push to fail
+    # with "does not provide any platform".
     _run_command_streaming(
-        ["docker", "build", "--platform", docker_platform, "-t", image_uri, "."],
+        [
+            "docker", "build",
+            "--platform", docker_platform,
+            "--provenance=false",
+            "--sbom=false",
+            "-t", image_uri,
+            ".",
+        ],
         cwd=project_root,
     )
     logger.info("  ✓ Docker build completed")

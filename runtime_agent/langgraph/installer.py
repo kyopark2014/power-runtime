@@ -1053,7 +1053,14 @@ def build_and_push_arm64_image(local_tag: str, ecr_uri: str, build_args: dict[st
         print("  Build on an ARM64 EC2 instance (e.g. t4g, m7g) and retry.", flush=True)
         return False
 
-    build_command = ["docker", "build", "--platform", "linux/arm64", "-t", local_tag, "."]
+    build_command = [
+        "docker", "build",
+        "--platform", "linux/arm64",
+        "--provenance=false",
+        "--sbom=false",
+        "-t", local_tag,
+        ".",
+    ]
     if build_args:
         for key, value in build_args.items():
             build_command.extend(["--build-arg", f"{key}={value}"])
