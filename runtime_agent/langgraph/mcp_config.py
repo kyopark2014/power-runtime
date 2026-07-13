@@ -28,8 +28,6 @@ contents_dir = os.path.join(parent_dir, "contents")
 logger.info(f"workingDir: {workingDir}")
 logger.info(f"contents_dir: {contents_dir}")
 
-mcp_user_config = {}
-
 AWS_TAVILY_RUNTIME_NAME = "agent_runtime_aws_tavily"
 AWS_TAVILY_RUNTIME_REGION = "us-east-1"
 
@@ -187,9 +185,6 @@ def load_config(mcp_type):
                 }
             }
         }
-
-    elif mcp_type == "사용자 설정":
-        return mcp_user_config
 
 def load_selected_config(mcp_servers: dict):
     logger.info(f"mcp_servers: {mcp_servers}")

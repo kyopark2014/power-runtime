@@ -55,7 +55,6 @@ flowchart TB
     TI["trade info stock trend"]
     WF["web_fetch npx"]
     IG[image generation]
-    UC["user config"]
   end
 
   subgraph MCPClient["langchain mcp adapters"]
@@ -101,7 +100,7 @@ flowchart TB
 | MCP (로컬 stdio / 원격) | `mcp_config.py`, `mcp_server_*.py`, aws-tavily Runtime | stdio subprocess 또는 AgentCore 원격 MCP |
 | Web UI | 루트 `Dockerfile` → ECS | FastAPI + React SPA. Agent 추론은 AgentCore에서 수행 |
 
-UI에서 MCP는 `application/mcp.list` 기준으로 `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `tavily`, `aws-tavily`, `image generation`, `korea_weather`, `사용자 설정` 등을 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator` 등을 별도로 선택합니다. UI는 `agentcore_client.run_agent`로 AgentCore Runtime에 직접 요청합니다.
+UI에서 MCP는 `application/mcp.list` 기준으로 `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `tavily`, `aws-tavily`, `image generation`, `korea_weather` 등을 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator` 등을 별도로 선택합니다. UI는 `agentcore_client.run_agent`로 AgentCore Runtime에 직접 요청합니다.
 
 ### 네트워크 설정
 
