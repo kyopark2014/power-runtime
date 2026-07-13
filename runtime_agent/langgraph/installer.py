@@ -378,9 +378,34 @@ def create_bedrock_agentcore_policy(config):
                     "ecr:GetAuthorizationToken",
                     "ecr:BatchGetImage",
                     "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchCheckLayerAvailability",
                     "ecr:DescribeRepositories",
                     "ecr:ListImages",
                     "ecr:DescribeImages"
+                ],
+                "Resource": "*"
+            },
+            {
+                "Sid": "MarketplaceTavilyECRAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "ecr:BatchGetImage",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:DescribeImages",
+                    "ecr:ListImages"
+                ],
+                "Resource": [
+                    "arn:aws:ecr:us-east-1:709825985650:repository/tavily/tavily-mcp"
+                ]
+            },
+            {
+                "Sid": "AWSMarketplaceAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "aws-marketplace:ViewSubscriptions",
+                    "aws-marketplace:Subscribe",
+                    "aws-marketplace:Unsubscribe"
                 ],
                 "Resource": "*"
             },
@@ -1897,15 +1922,26 @@ def create_aws_tavily_runtime():
             )
 
         if not agent_runtime_arn:
-            print("Error: Failed to create/update aws-tavily agent runtime")
-            return False
+            print(
+                "Warning: Failed to create/update aws-tavily agent runtime; "
+                "continuing so Observability/Evaluations/Dashboard still run."
+            )
+            print(
+                "  Check AWS Marketplace subscription for Tavily MCP and that "
+                "the runtime role can pull "
+                "709825985650.dkr.ecr.us-east-1.amazonaws.com/tavily/tavily-mcp."
+            )
+            return True
 
         update_config("aws_tavily_agent_runtime_arn", agent_runtime_arn)
         print("\n✓ aws-tavily agent runtime creation/update completed")
         return True
     except Exception as e:
-        print(f"Error creating/updating aws-tavily agent runtime: {e}")
-        return False
+        print(
+            f"Warning: aws-tavily agent runtime setup failed ({e}); "
+            "continuing remaining install steps"
+        )
+        return True
 
 
 def setup_agentcore_observability():
