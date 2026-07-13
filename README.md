@@ -595,7 +595,6 @@ npm run dev
 ```text
 cd application/web && npm install && npm run build
 cd ../..
-source .venv/bin/activate
 uvicorn application.server:app --host 0.0.0.0 --port 8501
 ```
 
