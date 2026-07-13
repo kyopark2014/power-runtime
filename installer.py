@@ -3962,6 +3962,80 @@ DOCKER_MIN_FREE_MB = 2048
 DOCKER_REQUIRED_FREE_MB = 1024
 
 
+def _docker_daemon_reachable(timeout: int = 20) -> Tuple[bool, str]:
+    """Return (ok, detail) for whether the local Docker daemon accepts commands."""
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, (result.stderr or result.stdout).strip()
+    except subprocess.TimeoutExpired:
+        return False, f"docker info timed out after {timeout}s"
+    except Exception as e:
+        return False, str(e)
+
+
+def _try_start_docker_daemon() -> bool:
+    """Best-effort start of the Docker service on Linux hosts."""
+    commands = [
+        ["systemctl", "start", "docker"],
+        ["sudo", "systemctl", "start", "docker"],
+        ["service", "docker", "start"],
+        ["sudo", "service", "docker", "start"],
+    ]
+    for cmd in commands:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if result.returncode == 0:
+                logger.info(f"  Started Docker via: {' '.join(cmd)}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_docker_daemon_running() -> None:
+    """Require a reachable Docker daemon before image build/push."""
+    ok, detail = _docker_daemon_reachable()
+    if ok:
+        logger.info("  ✓ Docker daemon is running")
+        return
+
+    logger.warning(f"  Docker daemon not reachable: {detail}")
+    logger.info("  Attempting to start Docker service...")
+    if _try_start_docker_daemon():
+        time.sleep(2)
+        ok, detail = _docker_daemon_reachable()
+        if ok:
+            logger.info("  ✓ Docker daemon is running")
+            return
+
+    raise RuntimeError(
+        "Docker daemon is not available.\n"
+        f"  Detail: {detail or 'unknown'}\n"
+        "  On Amazon Linux / EC2, run:\n"
+        "    sudo dnf install -y docker   # or: sudo yum install -y docker\n"
+        "    sudo systemctl start docker\n"
+        "    sudo systemctl enable docker\n"
+        "    sudo usermod -aG docker $USER\n"
+        "    newgrp docker\n"
+        "    docker info\n"
+        "  Then rerun installer.py (or use --skip-docker-build if the image is already in ECR)."
+    )
+
+
 def _host_is_arm64() -> bool:
     return os.uname().machine.lower() in ("aarch64", "arm64")
 
@@ -3993,31 +4067,63 @@ def _require_arm64_build_host(context: str) -> None:
 NATIVE_BUILDX_BUILDER = "ecs-native-builder"
 
 
+def _normalize_buildx_builder_name(name: str) -> str:
+    return name.strip().rstrip("*")
+
+
 def _list_docker_driver_builders() -> list[str]:
     """Return buildx builder names that use the docker driver."""
-    result = subprocess.run(
-        ["docker", "buildx", "ls"],
+    builders: list[str] = []
+
+    fmt = subprocess.run(
+        ["docker", "buildx", "ls", "--format", "{{.Name}} {{.Driver}}"],
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
     )
-    if result.returncode != 0:
-        return []
+    if fmt.returncode == 0:
+        for line in fmt.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1] == "docker":
+                name = _normalize_buildx_builder_name(parts[0])
+                if name and name not in builders:
+                    builders.append(name)
 
-    builders: list[str] = []
-    for line in result.stdout.splitlines():
-        # Skip header and node rows (" \_ nodename ...")
-        if not line.strip() or line.startswith("NAME") or line[:1].isspace():
+    if not builders:
+        result = subprocess.run(
+            ["docker", "buildx", "ls"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                # Skip header and node rows (" \_ nodename ...")
+                if not line.strip() or line.startswith("NAME") or line[:1].isspace():
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                name = _normalize_buildx_builder_name(parts[0])
+                driver = parts[1]
+                if driver == "docker" and name not in builders:
+                    builders.append(name)
+
+    for fallback_name in ("default", "desktop-linux"):
+        if fallback_name in builders:
             continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        name = parts[0].rstrip("*")
-        driver = parts[1]
-        # Exact match: "docker" only (not "docker-container")
-        if driver == "docker":
-            builders.append(name)
+        inspect = subprocess.run(
+            ["docker", "buildx", "inspect", fallback_name],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if inspect.returncode == 0:
+            builders.append(fallback_name)
+
     return builders
 
 
@@ -4077,13 +4183,14 @@ def _select_existing_docker_builder() -> Optional[str]:
     return None
 
 
-def _ensure_native_buildx_builder() -> None:
-    """Ensure a local docker-driver buildx builder for reliable ECR push.
+def _ensure_native_buildx_builder() -> bool:
+    """Ensure a usable buildx builder is selected for ECR push.
 
-    Docker only allows a single named instance of the docker driver in many
-    environments (Docker Desktop already provides default/desktop-linux).
-    Prefer reusing an existing docker-driver builder over creating a new one.
+    Returns True when buildx is ready, False when callers should use classic
+    ``docker build`` + ``docker push`` (native ARM64 EC2 hosts).
     """
+    selected: Optional[str] = None
+
     inspect = subprocess.run(
         ["docker", "buildx", "inspect", NATIVE_BUILDX_BUILDER],
         capture_output=True,
@@ -4092,15 +4199,10 @@ def _ensure_native_buildx_builder() -> None:
         check=False,
     )
     if inspect.returncode == 0:
-        _use_buildx_builder(NATIVE_BUILDX_BUILDER)
+        selected = NATIVE_BUILDX_BUILDER
     else:
         selected = _select_existing_docker_builder()
-        if selected:
-            logger.info(
-                f"  Reusing existing docker-driver buildx builder: {selected} "
-                f"(cannot create additional docker-driver instances)"
-            )
-        else:
+        if not selected:
             create = subprocess.run(
                 [
                     "docker", "buildx", "create",
@@ -4113,20 +4215,31 @@ def _ensure_native_buildx_builder() -> None:
                 timeout=120,
                 check=False,
             )
-            if create.returncode != 0:
+            if create.returncode == 0:
+                selected = NATIVE_BUILDX_BUILDER
+            else:
                 err = (create.stderr or create.stdout).strip()
-                # Last resort: reuse whatever docker-driver builder exists
-                if "additional instances of driver" in err:
-                    selected = _select_existing_docker_builder()
-                    if selected:
-                        logger.info(
-                            f"  Reusing existing docker-driver buildx builder: {selected} "
-                            f"after create failed: {err}"
-                        )
-                    else:
-                        raise RuntimeError(f"Failed to create buildx builder: {err}")
+                selected = _select_existing_docker_builder()
+                if selected:
+                    logger.info(
+                        f"  Reusing existing docker-driver buildx builder: {selected} "
+                        f"(cannot create additional docker-driver instances)"
+                    )
+                elif "additional instances of driver" in err:
+                    logger.warning(
+                        "  Could not create or select a buildx docker-driver builder; "
+                        "falling back to classic docker build + push."
+                    )
+                    return False
                 else:
-                    raise RuntimeError(f"Failed to create buildx builder: {err}")
+                    logger.warning(
+                        f"  buildx builder setup failed ({err}); "
+                        "falling back to classic docker build + push."
+                    )
+                    return False
+
+    if selected:
+        _use_buildx_builder(selected)
 
     bootstrap = subprocess.run(
         ["docker", "buildx", "inspect", "--bootstrap"],
@@ -4137,7 +4250,50 @@ def _ensure_native_buildx_builder() -> None:
     )
     if bootstrap.returncode != 0:
         err = (bootstrap.stderr or bootstrap.stdout).strip()
-        raise RuntimeError(f"Failed to bootstrap buildx builder: {err}")
+        logger.warning(
+            f"  buildx bootstrap failed ({err}); "
+            "falling back to classic docker build + push."
+        )
+        return False
+
+    return True
+
+
+def _build_and_push_with_buildx(
+    image_uri: str,
+    docker_platform: str,
+    project_root: str,
+) -> None:
+    _run_command_streaming(
+        [
+            "docker", "buildx", "build",
+            "--platform", docker_platform,
+            "--provenance=false",
+            "--sbom=false",
+            "-t", image_uri,
+            "--push",
+            ".",
+        ],
+        cwd=project_root,
+    )
+
+
+def _build_and_push_with_classic_docker(
+    image_uri: str,
+    docker_platform: str,
+    project_root: str,
+) -> None:
+    """Build and push without buildx (reliable on native ARM64 EC2)."""
+    _run_command_streaming(
+        [
+            "docker", "build",
+            "--platform", docker_platform,
+            "-t", image_uri,
+            ".",
+        ],
+        cwd=project_root,
+    )
+    _run_command_streaming(["docker", "push", image_uri], cwd=project_root)
 
 
 
@@ -4255,6 +4411,7 @@ def build_and_push_docker_image(
     if shutil.which("docker") is None:
         raise RuntimeError("Docker CLI is required to build and push the container image")
 
+    ensure_docker_daemon_running()
     _require_arm64_build_host("ECS container image build")
 
     if not image_tag:
@@ -4289,23 +4446,16 @@ def build_and_push_docker_image(
     docker_platform = _docker_build_platform()
     logger.info(f"  Host architecture: {os.uname().machine}")
     logger.info(f"  Docker platform: {docker_platform} (native ARM64 build, no QEMU)")
-    _ensure_native_buildx_builder()
+    use_buildx = _ensure_native_buildx_builder()
     logger.info(f"  Starting Docker build+push: {image_uri}")
     logger.info("  Build output streams below (this may take several minutes)...")
-    # Push directly from buildx to avoid Docker Desktop containerd digest mismatch
-    # between `docker build` and `docker push` on large multi-stage images.
-    _run_command_streaming(
-        [
-            "docker", "buildx", "build",
-            "--platform", docker_platform,
-            "--provenance=false",
-            "--sbom=false",
-            "-t", image_uri,
-            "--push",
-            ".",
-        ],
-        cwd=project_root,
-    )
+    if use_buildx:
+        # Push directly from buildx to avoid Docker Desktop containerd digest mismatch
+        # between `docker build` and `docker push` on large multi-stage images.
+        _build_and_push_with_buildx(image_uri, docker_platform, project_root)
+    else:
+        logger.info("  Using classic docker build + push (no buildx)")
+        _build_and_push_with_classic_docker(image_uri, docker_platform, project_root)
     logger.info("  ✓ Docker build and push completed")
     logger.info(f"  Promoting {image_tag} to latest in ECR (avoid stale manifest list push)")
     _promote_ecr_image_tag(repository_uri, image_tag, "latest")
