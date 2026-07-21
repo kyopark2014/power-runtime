@@ -1,0 +1,11 @@
+{
+  "MCP": [
+    "web_fetch",
+    "aws-tavily",
+    "aws documentation",
+    "korea_weather"
+  ],
+  "SKILL": [
+    "skill-creator"
+  ]
+}
