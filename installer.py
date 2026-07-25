@@ -925,6 +925,174 @@ def create_ecs_roles() -> Dict[str, str]:
     }
 
 
+def _get_installer_iam_arn() -> str:
+    """Return IAM ARN for the credentials running this installer.
+
+    Assumed-role sessions (including IAM Identity Center / SSO) are normalized
+    to the underlying role ARN, including the role path. A path-less
+    ``role/{name}`` ARN is wrong for SSO roles such as
+    ``role/aws-reserved/sso.amazonaws.com/.../AWSReservedSSO_*``.
+    """
+    identity = sts_client.get_caller_identity()
+    arn = identity["Arn"]
+    if ":assumed-role/" in arn:
+        role_name = arn.split(":assumed-role/")[1].split("/")[0]
+        try:
+            return iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
+        except ClientError as e:
+            logger.warning(
+                f"  Could not resolve full role ARN for {role_name}: {e}; "
+                f"falling back to path-less role ARN"
+            )
+            return f"arn:aws:iam::{identity['Account']}:role/{role_name}"
+    return arn
+
+
+def _opensearch_identity_center_role_arns() -> List[str]:
+    """IAM Identity Center (SSO) role ARNs used for AWS Console login.
+
+    Dashboards authenticate as the console principal, which is often an
+    ``AWSReservedSSO_*`` role even when the installer itself runs with IAM
+    user access keys. Including these roles (not account root) keeps
+    Dashboards accessible without widening to ``arn:aws:iam::*:root``.
+    """
+    role_arns: List[str] = []
+    try:
+        paginator = iam_client.get_paginator("list_roles")
+        for page in paginator.paginate(
+            PathPrefix="/aws-reserved/sso.amazonaws.com/"
+        ):
+            for role in page.get("Roles", []):
+                arn = role.get("Arn")
+                name = role.get("RoleName", "")
+                if arn and name.startswith("AWSReservedSSO_"):
+                    role_arns.append(arn)
+    except ClientError as e:
+        logger.warning(
+            f"  Could not list IAM Identity Center roles for OpenSearch "
+            f"Dashboards access: {e}"
+        )
+    return role_arns
+
+
+def _opensearch_data_access_principals(
+    knowledge_base_role_arn: Optional[str] = None,
+    ec2_role_arn: Optional[str] = None,
+) -> List[str]:
+    """Principals that need OpenSearch Serverless data-plane access."""
+    principals = [
+        _get_installer_iam_arn(),
+        *_opensearch_identity_center_role_arns(),
+    ]
+    if knowledge_base_role_arn:
+        principals.append(knowledge_base_role_arn)
+    if ec2_role_arn:
+        principals.append(ec2_role_arn)
+    seen = set()
+    unique = []
+    for principal in principals:
+        if principal and principal not in seen:
+            seen.add(principal)
+            unique.append(principal)
+    return unique
+
+
+def _build_opensearch_data_policy_document(
+    collection_name: str, principals: List[str]
+) -> List[Dict]:
+    """Build OpenSearch Serverless data access policy document."""
+    return [
+        {
+            "Rules": [
+                {
+                    "Resource": [f"collection/{collection_name}"],
+                    "Permission": [
+                        "aoss:CreateCollectionItems",
+                        "aoss:DeleteCollectionItems",
+                        "aoss:UpdateCollectionItems",
+                        "aoss:DescribeCollectionItems",
+                    ],
+                    "ResourceType": "collection",
+                },
+                {
+                    "Resource": [f"index/{collection_name}/*"],
+                    "Permission": [
+                        "aoss:CreateIndex",
+                        "aoss:DeleteIndex",
+                        "aoss:UpdateIndex",
+                        "aoss:DescribeIndex",
+                        "aoss:ReadDocument",
+                        "aoss:WriteDocument",
+                    ],
+                    "ResourceType": "index",
+                },
+            ],
+            "Principal": principals,
+        }
+    ]
+
+
+def _ensure_opensearch_data_access_principals(
+    data_policy_name: str,
+    collection_name: str,
+    knowledge_base_role_arn: Optional[str] = None,
+    ec2_role_arn: Optional[str] = None,
+) -> None:
+    """Ensure data access policy grants installer, SSO console, KB, and optional EC2 roles."""
+    principals_to_add = _opensearch_data_access_principals(
+        knowledge_base_role_arn, ec2_role_arn
+    )
+    try:
+        policy_detail = opensearch_client.get_access_policy(
+            name=data_policy_name, type="data"
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+        data_policy = _build_opensearch_data_policy_document(
+            collection_name, principals_to_add
+        )
+        opensearch_client.create_access_policy(
+            name=data_policy_name,
+            type="data",
+            policy=json.dumps(data_policy),
+        )
+        logger.info(f"  Created data access policy: {data_policy_name}")
+        logger.info("  Waiting for OpenSearch data access policy to propagate...")
+        time.sleep(20)
+        return
+
+    current_policy = policy_detail["accessPolicyDetail"]["policy"]
+    if isinstance(current_policy, str):
+        current_policy = json.loads(current_policy)
+
+    needs_update = False
+    for rule in current_policy:
+        if "Principal" not in rule:
+            continue
+        current_principals = rule["Principal"]
+        if not isinstance(current_principals, list):
+            current_principals = [current_principals]
+        for principal in principals_to_add:
+            if principal and principal not in current_principals:
+                current_principals.append(principal)
+                needs_update = True
+                logger.info(f"  Adding principal to {data_policy_name}: {principal}")
+        rule["Principal"] = current_principals
+
+    if needs_update:
+        opensearch_client.update_access_policy(
+            name=data_policy_name,
+            type="data",
+            policy=json.dumps(current_policy),
+            policyVersion=policy_detail["accessPolicyDetail"]["policyVersion"],
+        )
+        logger.info(f"  Updated data access policy: {data_policy_name}")
+        logger.info("  Waiting for OpenSearch data access policy to propagate...")
+        time.sleep(20)
+    else:
+        logger.debug(f"  Required principals already present in {data_policy_name}")
+
 
 def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_arn: str = None) -> Dict[str, str]:
     """Create OpenSearch Serverless collection and policies."""
@@ -978,49 +1146,12 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
                             raise Exception(f"Timeout waiting for collection endpoint. Collection status: {status}")
                         time.sleep(10)
                 
-                # Update data access policy to include roles if needed
-                try:
-                    policy_detail = opensearch_client.get_access_policy(
-                        name=data_policy_name,
-                        type="data"
-                    )
-                    current_policy = policy_detail["accessPolicyDetail"]["policy"]
-                    
-                    # Check if roles are already in principals and update if needed
-                    needs_update = False
-                    roles_to_add = []
-                    if ec2_role_arn:
-                        roles_to_add.append(("EC2", ec2_role_arn))
-                    if knowledge_base_role_arn:
-                        roles_to_add.append(("Knowledge Base", knowledge_base_role_arn))
-                    
-                    for rule in current_policy:
-                        if "Principal" in rule:
-                            current_principals = rule["Principal"]
-                            if not isinstance(current_principals, list):
-                                current_principals = [current_principals]
-                            
-                            for role_type, role_arn in roles_to_add:
-                                if role_arn and role_arn not in current_principals:
-                                    current_principals.append(role_arn)
-                                    needs_update = True
-                                    logger.debug(f"Adding {role_type} role to data access policy: {role_arn}")
-                            
-                            rule["Principal"] = current_principals
-                    
-                    # Update policy if needed
-                    if needs_update:
-                        opensearch_client.update_access_policy(
-                            name=data_policy_name,
-                            type="data",
-                            policy=json.dumps(current_policy),
-                            policyVersion=policy_detail["accessPolicyDetail"]["policyVersion"]
-                        )
-                        logger.info(f"Updated data access policy to include roles")
-                    else:
-                        logger.debug("All roles already present in data access policy")
-                except Exception as update_error:
-                    logger.warning(f"Could not update existing data access policy: {update_error}")
+                _ensure_opensearch_data_access_principals(
+                    data_policy_name,
+                    collection_name,
+                    knowledge_base_role_arn,
+                    ec2_role_arn,
+                )
                 
                 return {
                     "arn": collection_arn,
@@ -1087,49 +1218,11 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
             logger.error(f"Failed to create network policy: {e}")
             raise
     
-    # Create data access policy
-    account_arn = f"arn:aws:iam::{account_id}:root"
-    principals = [account_arn]
-    
-    # Add EC2 role to principals if provided
-    if ec2_role_arn:
-        principals.append(ec2_role_arn)
-        logger.debug(f"Adding EC2 role to data access policy: {ec2_role_arn}")
-    
-    # Add Knowledge Base role to principals if provided
-    if knowledge_base_role_arn:
-        principals.append(knowledge_base_role_arn)
-        logger.debug(f"Adding Knowledge Base role to data access policy: {knowledge_base_role_arn}")
-    
-    data_policy = [
-        {
-            "Rules": [
-                {
-                    "Resource": [f"collection/{collection_name}"],
-                    "Permission": [
-                        "aoss:CreateCollectionItems",
-                        "aoss:DeleteCollectionItems",
-                        "aoss:UpdateCollectionItems",
-                        "aoss:DescribeCollectionItems"
-                    ],
-                    "ResourceType": "collection"
-                },
-                {
-                    "Resource": [f"index/{collection_name}/*"],
-                    "Permission": [
-                        "aoss:CreateIndex",
-                        "aoss:DeleteIndex",
-                        "aoss:UpdateIndex",
-                        "aoss:DescribeIndex",
-                        "aoss:ReadDocument",
-                        "aoss:WriteDocument"
-                    ],
-                    "ResourceType": "index"
-                }
-            ],
-            "Principal": principals
-        }
-    ]
+    # Create data access policy (installer + SSO console + KB/EC2; no account root)
+    principals = _opensearch_data_access_principals(
+        knowledge_base_role_arn, ec2_role_arn
+    )
+    data_policy = _build_opensearch_data_policy_document(collection_name, principals)
     
     try:
         opensearch_client.create_access_policy(
@@ -1141,54 +1234,12 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConflictException":
             logger.warning(f"Data access policy already exists: {data_policy_name}")
-            # Try to update existing policy to include roles
-            try:
-                # Get current policy version
-                policy_detail = opensearch_client.get_access_policy(
-                    name=data_policy_name,
-                    type="data"
-                )
-                current_policy = policy_detail["accessPolicyDetail"]["policy"]
-                
-                # Check if roles are already in principals and update if needed
-                needs_update = False
-                roles_to_add = []
-                if ec2_role_arn:
-                    roles_to_add.append(("EC2", ec2_role_arn))
-                if knowledge_base_role_arn:
-                    roles_to_add.append(("Knowledge Base", knowledge_base_role_arn))
-                
-                for rule in current_policy:
-                    if "Principal" in rule:
-                        current_principals = rule["Principal"]
-                        if not isinstance(current_principals, list):
-                            current_principals = [current_principals]
-                        
-                        for role_type, role_arn in roles_to_add:
-                            if role_arn and role_arn not in current_principals:
-                                current_principals.append(role_arn)
-                                needs_update = True
-                                logger.debug(f"Adding {role_type} role to data access policy: {role_arn}")
-                        
-                        rule["Principal"] = current_principals
-                
-                # Update policy if needed
-                if needs_update:
-                    opensearch_client.update_access_policy(
-                        name=data_policy_name,
-                        type="data",
-                        policy=json.dumps(current_policy),
-                        policyVersion=policy_detail["accessPolicyDetail"]["policyVersion"]
-                    )
-                    logger.info(f"Updated data access policy to include roles")
-                else:
-                    logger.debug("All roles already present in data access policy")
-            except Exception as update_error:
-                logger.warning(f"Could not update existing data access policy: {update_error}")
-                if ec2_role_arn:
-                    logger.warning(f"Please manually add EC2 role {ec2_role_arn} to the data access policy")
-                if knowledge_base_role_arn:
-                    logger.warning(f"Please manually add Knowledge Base role {knowledge_base_role_arn} to the data access policy")
+            _ensure_opensearch_data_access_principals(
+                data_policy_name,
+                collection_name,
+                knowledge_base_role_arn,
+                ec2_role_arn,
+            )
         else:
             logger.error(f"Failed to create data access policy: {e}")
             raise
@@ -1273,6 +1324,13 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
             
             if not collection_endpoint:
                 raise Exception("Collection endpoint is not available even after waiting")
+
+            _ensure_opensearch_data_access_principals(
+                data_policy_name,
+                collection_name,
+                knowledge_base_role_arn,
+                ec2_role_arn,
+            )
             
             return {
                 "arn": collection_detail["arn"],
