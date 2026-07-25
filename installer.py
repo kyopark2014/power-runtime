@@ -32,6 +32,10 @@ SSE_ORIGIN_READ_TIMEOUT_SECONDS = 120
 ALB_IDLE_TIMEOUT_SECONDS = 120
 
 
+def agent_runtime_name(project_name: str) -> str:
+    """Return Bedrock AgentCore runtime name (e.g. strands_runtime)."""
+    return project_name.replace("-", "_")
+
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
@@ -468,6 +472,19 @@ def create_knowledge_base_role() -> str:
 def _get_ecs_task_inline_policies() -> List[Dict]:
     """Least-privilege inline IAM policies for the ECS task (Web UI) role."""
     bucket_arn, object_arn = _project_s3_bucket_arns()
+    runtime_name = agent_runtime_name(project_name)
+    runtime_resource_arns = [
+        f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_name}",
+        f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_name}-*",
+        (
+            f"arn:aws:bedrock-agentcore:{region}:{account_id}:"
+            f"runtime/{runtime_name}/runtime-endpoint/*"
+        ),
+        (
+            f"arn:aws:bedrock-agentcore:{region}:{account_id}:"
+            f"runtime/{runtime_name}-*/runtime-endpoint/*"
+        ),
+    ]
     return [
         {
             "name": f"ecs-task-bedrock-policy-for-{project_name}",
@@ -539,9 +556,8 @@ def _get_ecs_task_inline_policies() -> List[Dict]:
                             "bedrock-agentcore:GetAgentRuntime",
                             "bedrock-agentcore-control:GetAgentRuntime",
                         ],
-                        "Resource": [
-                            f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/*",
-                        ],
+                        # Limit to this project's runtime name (not account-wide runtime/*).
+                        "Resource": runtime_resource_arns,
                     },
                     {
                         "Sid": "ListAgentRuntimes",
