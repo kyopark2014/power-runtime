@@ -43,6 +43,7 @@ aws_tavily_control_client = boto3.client(
 agentcore_control_client = boto3.client("bedrock-agentcore-control", region_name=region)
 s3files_client = boto3.client("s3files", region_name=region)
 cloudwatch_client = boto3.client("cloudwatch", region_name=region)
+secretsmanager_client = boto3.client("secretsmanager", region_name=region)
 
 # Get account ID if not set
 if not account_id:
@@ -51,6 +52,7 @@ if not account_id:
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 vector_index_name = project_name
 vector_bucket_name = f"{project_name}-{account_id}"
+ALB_ORIGIN_HEADER_SECRET_NAME = f"{project_name}/cloudfront-alb-origin-header"
 
 # Configure logging
 def setup_logging():
@@ -1973,6 +1975,24 @@ def delete_local_config_files() -> None:
     logger.info("✓ Local config files processed")
 
 
+def delete_alb_origin_header_secret() -> None:
+    """Delete CloudFront→ALB origin verification header from Secrets Manager."""
+    logger.info("Deleting ALB origin header secret")
+    secret_name = ALB_ORIGIN_HEADER_SECRET_NAME
+    try:
+        secretsmanager_client.delete_secret(
+            SecretId=secret_name,
+            ForceDeleteWithoutRecovery=True,
+        )
+        logger.info(f"  ✓ Deleted Secrets Manager secret: {secret_name}")
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("ResourceNotFoundException", "ResourceNotFound"):
+            logger.info(f"  Secret not found: {secret_name}")
+        else:
+            logger.warning(f"  Could not delete secret {secret_name}: {e}")
+
+
 def _find_project_vpc_ids() -> list:
     """Return VPC IDs tagged for this project."""
     vpc_name = f"vpc-for-{project_name}"
@@ -2364,6 +2384,7 @@ def main():
         delete_opensearch_collection()
         delete_knowledge_bases()
         delete_s3_vectors_store()
+        delete_alb_origin_header_secret()
         delete_iam_roles()
         delete_s3_buckets()
         delete_disabled_cloudfront_distributions()

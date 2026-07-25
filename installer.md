@@ -33,6 +33,7 @@ CDK 스택과 동등한 AWS 인프라를 프로그래밍 방식으로 배포합�
 - **S3 Files 세션 스토리지**: AgentCore Runtime checkpoint 및 ECS 앱 데이터 영속화
 - **ECS Fargate 배포**: multi-stage Dockerfile 기반 이미지를 ECR에 push한 뒤 ECS Fargate 서비스로 실행
 - **SSE 장시간 스트림**: ALB idle timeout·CloudFront origin read timeout을 120초로 설정
+- **CloudFront→ALB 오리진 보호**: Secrets Manager 랜덤 헤더 주입 + ALB default 403 (헤더 일치 시에만 forward)
 
 ### 사전 요구사항
 - **ARM64 빌드 호스트**: ECS/AgentCore 이미지는 `linux/arm64` 네이티브 빌드만 지원 (예: t4g, m7g EC2). x86 호스트에서는 QEMU 크로스 빌드 없이 즉시 실패합니다.
@@ -72,7 +73,10 @@ distance_metric = "cosine"
 
 # 커스텀 헤더 (CloudFront-ALB 통신용)
 custom_header_name = "X-Custom-Header"
-custom_header_value = f"{project_name}_12dab15e4s31"
+# 값은 소스에 두지 않음. Secrets Manager:
+#   {project_name}/cloudfront-alb-origin-header
+# get_or_create_alb_origin_header()가 최초 배포 시 랜덤 생성·이후 재사용
+ALB_ORIGIN_HEADER_SECRET_NAME = f"{project_name}/cloudfront-alb-origin-header"
 ```
 
 ---
@@ -160,14 +164,21 @@ VPC 생성 직후 `[5.5/10]` 단계에서 프로비저닝합니다. 상세 동�
 - **헬스체크**: `/_stcore/health` (ALB 타겟 그룹)
 - **Idle timeout**: 120초 (`ALB_IDLE_TIMEOUT_SECONDS`) — 장시간 SSE 스트림 유지
 - **Stickiness**: `lb_cookie` 86400초 (태스크별 SQLite working-copy 일관성)
+- **Origin 보호**: listener default = **403 fixed-response**, `X-Custom-Header` 일치 시에만 ECS target group으로 forward (`ensure_alb_listener_origin_protection`)
 
 ### 7. CloudFront 배포
 - **오리진**:
-  - 기본: ALB (동적 컨텐츠)
+  - 기본: ALB (동적 컨텐츠) — Secrets Manager 오리진 헤더를 Custom Header로 주입
   - `/images/*`, `/docs/*`, `/artifacts/*`: S3 (정적 컨텐츠)
 - **캐시 정책**: Managed-CachingDisabled
 - **프로토콜**: HTTP → HTTPS 리다이렉트
 - **Origin read timeout**: 120초 (`SSE_ORIGIN_READ_TIMEOUT_SECONDS`) — 장시간 SSE tool run 대비
+- **재사용**: 동일 `project_name`의 기존 CloudFront 배포가 있으면 재사용 (헤더·타임아웃·`/artifacts/*` behavior 갱신)
+
+### 7.5. Secrets Manager (ALB origin header)
+- **이름**: `{project_name}/cloudfront-alb-origin-header`
+- **용도**: CloudFront → ALB 오리진 검증용 `X-Custom-Header` 값 (랜덤, 소스 하드코딩 없음)
+- **생성**: `get_or_create_alb_origin_header()` / 삭제: `uninstaller.delete_alb_origin_header_secret()`
 
 ### 8. ECR (Elastic Container Registry)
 
@@ -363,17 +374,21 @@ def create_alb(vpc_info: Dict[str, str]) -> Dict[str, str]:
     return {"arn": alb_arn, "dns": alb_dns}
 ```
 
+#### `get_or_create_alb_origin_header()` / `ensure_alb_listener_origin_protection()`
+CloudFront→ALB 오리진 검증 헤더를 Secrets Manager에서 생성·재사용하고, ALB listener를 default 403 + 헤더 일치 시 forward로 맞춥니다.
+
 #### `create_cloudfront_distribution()`
 CloudFront 배포 생성 (ALB + S3 하이브리드)
 
 ```python
 def create_cloudfront_distribution(alb_info: Dict[str, str],
-                                   s3_bucket_name: str) -> Dict[str, str]:
+                                   s3_bucket_name: str,
+                                   origin_header_value: str) -> Dict[str, str]:
     """Create CloudFront distribution with hybrid ALB + S3 origins."""
     # Origin Access Identity 생성
     # S3 버킷 정책 업데이트
     # CloudFront 배포 생성
-    #   - 기본 오리진: ALB (OriginReadTimeout=120)
+    #   - 기본 오리진: ALB (OriginReadTimeout=120, CustomHeaders=origin header)
     #   - /images/*, /docs/*, /artifacts/*: S3
     return {"id": distribution_id, "domain": distribution_domain}
 ```
@@ -471,13 +486,17 @@ def install_agent_runtime(runtime_type: str = "langgraph") -> bool:
 | `classify_subnets()` | 서브넷을 퍼블릭/프라이빗으로 분류 |
 | `wait_for_subnet_available()` / `wait_for_nat_gateway()` | 리소스 가용 상태 대기 |
 | `ensure_alb_idle_timeout()` | ALB idle timeout 120초 설정 |
-| `_ensure_cloudfront_alb_origin_timeouts()` | CloudFront ALB origin read timeout 120초 |
+| `get_or_create_alb_origin_header()` | Secrets Manager 오리진 헤더 생성·재사용 |
+| `ensure_alb_listener_origin_protection()` | ALB default 403 + 커스텀 헤더 forward |
+| `_ensure_cloudfront_alb_origin_config()` | CloudFront ALB origin 헤더 + read timeout 120초 |
+| `_ensure_cloudfront_alb_origin_timeouts()` | 하위 호환 래퍼 (`_ensure_cloudfront_alb_origin_config`) |
+| `_ecs_agent_runtime_resource_arns()` | ECS Task Role AgentCore Resource ARN 후보 수집 |
 | `_ensure_cloudfront_s3_path_behavior()` | 기존 CF에 `/artifacts/*` 등 S3 behavior 추가 |
 | `create_ecs_log_group()` | ECS CloudWatch Logs 그룹 생성 |
 | `ensure_ecs_service_linked_role()` | ECS service-linked role 보장 |
 | `create_ecs_cluster()` | ECS 클러스터 생성 |
 | `create_alb_target_group_for_ecs()` | Fargate용 IP 타겟 그룹 + stickiness |
-| `create_alb_listener_with_target_group()` | ALB 리스너 및 커스텀 헤더 규칙 생성 |
+| `create_alb_listener_with_target_group()` | ALB 리스너 origin protection 위임 |
 | `_wait_for_ecs_service_ready()` | ECS 서비스/타겟 안정화 대기 |
 | `_require_arm64_build_host()` | ARM64 EC2에서만 Docker 빌드 허용 |
 | `_ensure_native_buildx_builder()` / `_ensure_docker_disk_space()` | buildx·디스크 공간 준비 |
@@ -770,4 +789,4 @@ AgentCore Runtime 삭제:
 python runtime_agent/langgraph/uninstaller.py
 ```
 
-삭제 순서: CloudFront → ECS (서비스/클러스터/태스크 정의/로그/ECR) → ALB → EC2(레거시) → VPC → 기타 리소스
+삭제 순서: CloudFront → ECS (서비스/클러스터/태스크 정의/로그/ECR) → ALB → EC2(레거시) → VPC → 기타 리소스 → **ALB origin header secret** → IAM / S3
