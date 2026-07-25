@@ -51,6 +51,80 @@ ALB_ORIGIN_HEADER_SECRET_NAME = f"{project_name}/cloudfront-alb-origin-header"
 CLOUDFRONT_SIGNING_KEY_SECRET_NAME = f"{project_name}/cloudfront-signing-key"
 CLOUDFRONT_S3_SIGNED_PATHS = ("/images/*", "/docs/*", "/artifacts/*")
 
+
+def _s3_prefixes_for_cloudfront() -> List[str]:
+    """Map CloudFront path patterns (/images/*) to S3 key prefixes (images)."""
+    prefixes: List[str] = []
+    for pattern in CLOUDFRONT_S3_SIGNED_PATHS:
+        trimmed = pattern.strip("/")
+        if trimmed.endswith("/*"):
+            trimmed = trimmed[:-2]
+        elif trimmed.endswith("*"):
+            trimmed = trimmed[:-1].rstrip("/")
+        if trimmed:
+            prefixes.append(trimmed)
+    return prefixes
+
+
+def _cloudfront_oai_get_object_resources(s3_bucket_name: str) -> List[str]:
+    """S3 object ARNs CloudFront OAI may read (matches CF S3 cache behaviors)."""
+    return [
+        f"arn:aws:s3:::{s3_bucket_name}/{prefix}/*"
+        for prefix in _s3_prefixes_for_cloudfront()
+    ]
+
+
+def _find_s3_oai_id_from_distribution(dist_id: str) -> Optional[str]:
+    """Return CloudFront OAI id attached to this distribution's S3 origin, if any."""
+    try:
+        dist = cloudfront_client.get_distribution_config(Id=dist_id)["DistributionConfig"]
+    except ClientError:
+        return None
+    for origin in (dist.get("Origins") or {}).get("Items") or []:
+        oai_path = (
+            (origin.get("S3OriginConfig") or {}).get("OriginAccessIdentity") or ""
+        ).strip()
+        if oai_path:
+            return oai_path.rsplit("/", 1)[-1]
+    return None
+
+
+def ensure_cloudfront_oai_bucket_policy(s3_bucket_name: str, oai_id: str) -> None:
+    """Restrict OAI s3:GetObject to CF-served prefixes (images/docs/artifacts)."""
+    if not oai_id:
+        raise ValueError("oai_id is required for CloudFront S3 bucket policy")
+    resources = _cloudfront_oai_get_object_resources(s3_bucket_name)
+    if not resources:
+        raise ValueError("No CloudFront S3 prefixes configured")
+
+    bucket_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "AllowCloudFrontAccess",
+                "Effect": "Allow",
+                "Principal": {
+                    "AWS": (
+                        f"arn:aws:iam::cloudfront:user/"
+                        f"CloudFront Origin Access Identity {oai_id}"
+                    )
+                },
+                "Action": "s3:GetObject",
+                "Resource": resources,
+            }
+        ],
+    }
+    s3_client.put_bucket_policy(
+        Bucket=s3_bucket_name,
+        Policy=json.dumps(bucket_policy),
+    )
+    logger.info(
+        "  ✓ S3 bucket policy: OAI GetObject limited to %s",
+        ", ".join(_s3_prefixes_for_cloudfront()),
+    )
+
+
+
 # Bedrock Knowledge Base requires these metadata keys as non-filterable on S3 Vectors index
 BEDROCK_NON_FILTERABLE_METADATA_KEYS = [
     "AMAZON_BEDROCK_TEXT",
@@ -589,6 +663,7 @@ def wait_for_iam_role_propagation(role_name: str, wait_seconds: int = 15) -> Non
         f"kb-bedrock-policy-for-{project_name}",
         f"kb-s3-policy-for-{project_name}",
         f"kb-opensearch-policy-for-{project_name}",
+        f"kb-s3vectors-policy-for-{project_name}",
     }
     for attempt in range(3):
         try:
@@ -678,6 +753,36 @@ def create_knowledge_base_role() -> str:
         ],
     }
     attach_inline_policy(role_name, f"kb-opensearch-policy-for-{project_name}", opensearch_policy)
+
+    # S3 Vectors is the default KB vector store for this project
+    vector_arn = s3_vectors_bucket_arn()
+    s3vectors_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "S3VectorsAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "s3vectors:GetVectorBucket",
+                    "s3vectors:ListVectorBuckets",
+                    "s3vectors:GetIndex",
+                    "s3vectors:ListIndexes",
+                    "s3vectors:QueryVectors",
+                    "s3vectors:GetVectors",
+                    "s3vectors:PutVectors",
+                    "s3vectors:DeleteVectors",
+                    "s3vectors:ListVectors",
+                ],
+                "Resource": [
+                    vector_arn,
+                    f"{vector_arn}/index/*",
+                ],
+            }
+        ],
+    }
+    attach_inline_policy(
+        role_name, f"kb-s3vectors-policy-for-{project_name}", s3vectors_policy
+    )
     
     wait_for_iam_role_propagation(role_name)
     return role_arn
@@ -3783,6 +3888,18 @@ def _reuse_cloudfront_distribution(
         )
 
     try:
+        oai_id = _find_s3_oai_id_from_distribution(dist_id)
+        if oai_id:
+            ensure_cloudfront_oai_bucket_policy(bucket_name, oai_id)
+        else:
+            logger.warning("  Could not find S3 OAI on CloudFront distribution; skip bucket policy")
+    except Exception as e:
+        logger.warning(
+            f"Could not tighten CloudFront OAI S3 bucket policy "
+            f"(reusing distribution anyway): {e}"
+        )
+
+    try:
         _ensure_cloudfront_alb_origin_config(dist_id, origin_header_value)
     except Exception as e:
         logger.warning(
@@ -4259,38 +4376,16 @@ def create_cloudfront_distribution(
         logger.error(f"Failed to handle Origin Access Identity: {e}")
         raise
     
-    # Update S3 bucket policy to allow CloudFront access
+    # Update S3 bucket policy to allow CloudFront access (prefix-scoped)
     logger.info("  Updating S3 bucket policy for CloudFront access...")
-    
-    bucket_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Sid": "AllowCloudFrontAccess",
-                "Effect": "Allow",
-                "Principal": {
-                    "AWS": f"arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity {oai_id}"
-                },
-                "Action": "s3:GetObject",
-                "Resource": f"arn:aws:s3:::{s3_bucket_name}/*"
-            }
-        ]
-    }
-    
     try:
         # Wait for OAI to propagate before applying bucket policy
         logger.info("  Waiting for OAI to propagate...")
         time.sleep(10)
-        
-        s3_client.put_bucket_policy(
-            Bucket=s3_bucket_name,
-            Policy=json.dumps(bucket_policy)
-        )
-        logger.info(f"  ✓ Updated S3 bucket policy")
+        ensure_cloudfront_oai_bucket_policy(s3_bucket_name, oai_id)
     except ClientError as e:
         logger.error(f"Failed to update S3 bucket policy: {e}")
         logger.error(f"OAI ID: {oai_id}")
-        logger.error(f"Bucket Policy: {json.dumps(bucket_policy, indent=2)}")
         raise
 
     # Create CloudFront distribution with both ALB and S3 origins (matching provided config format)
