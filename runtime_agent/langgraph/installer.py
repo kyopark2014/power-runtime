@@ -309,13 +309,9 @@ def agent_runtime_name(project_name: str) -> str:
     return project_name.replace("-", "_")
 
 
-def _project_agent_runtime_resource_arns(config) -> list:
-    """IAM Resource ARNs limited to this project's AgentCore runtime (+ endpoints)."""
-    region = config["region"]
-    account_id = config["accountId"]
-    project_name = config.get("projectName", "agentcore")
-    runtime_name = agent_runtime_name(project_name)
-    arns = [
+def _runtime_invoke_resource_arns(region: str, account_id: str, runtime_name: str) -> list:
+    """Wildcard IAM Resource ARNs for InvokeAgentRuntime on one runtime family."""
+    return [
         f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_name}",
         f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_name}-*",
         (
@@ -327,14 +323,24 @@ def _project_agent_runtime_resource_arns(config) -> list:
             f"runtime/{runtime_name}-*/runtime-endpoint/*"
         ),
     ]
-    agent_runtime_arn = (config.get("agent_runtime_arn") or "").strip()
-    if agent_runtime_arn:
-        if agent_runtime_arn not in arns:
-            arns.append(agent_runtime_arn)
-        endpoint_arn = f"{agent_runtime_arn}/runtime-endpoint/*"
-        if endpoint_arn not in arns:
-            arns.append(endpoint_arn)
-    return arns
+
+
+def _project_agent_runtime_resource_arns(config) -> list:
+    """IAM Resource ARNs for this project's LangGraph AgentCore runtime."""
+    region = config["region"]
+    account_id = config["accountId"]
+    project_name = config.get("projectName", "agentcore")
+    return _runtime_invoke_resource_arns(
+        region, account_id, agent_runtime_name(project_name)
+    )
+
+
+def _aws_tavily_runtime_resource_arns(config) -> list:
+    """IAM Resource ARNs for the remote aws-tavily MCP runtime (us-east-1)."""
+    account_id = config["accountId"]
+    return _runtime_invoke_resource_arns(
+        AWS_TAVILY_RUNTIME_REGION, account_id, AWS_TAVILY_RUNTIME_NAME
+    )
 
 
 def _project_s3_resource_arns(config) -> tuple:
@@ -497,7 +503,6 @@ def create_bedrock_agentcore_policy(config):
                 ],
                 "Resource": [
                     f"arn:aws:bedrock-agentcore:{region}:{accountId}:memory/*",
-                    f"arn:aws:bedrock-agentcore:{region}:{accountId}:memory/{projectName.replace('-', '_')}*",
                 ],
             },
             {
@@ -728,10 +733,10 @@ def create_bedrock_agentcore_policy(config):
                             print(f"Failed to switch version {version['VersionId']}: {e}")
                             continue
             
-            # Create policy version
+            # Create policy version (compact JSON to stay under 6144 PolicySize quota)
             response = iam_client.create_policy_version(
                 PolicyArn=existing_policy['Policy']['Arn'],
-                PolicyDocument=json.dumps(policy_document),
+                PolicyDocument=json.dumps(policy_document, separators=(",", ":")),
                 SetAsDefault=True
             )
             print(f"✓ Policy update completed: {response['PolicyVersion']['VersionId']}")
@@ -741,7 +746,7 @@ def create_bedrock_agentcore_policy(config):
             # Create new policy
             response = iam_client.create_policy(
                 PolicyName=policy_name,
-                PolicyDocument=json.dumps(policy_document),
+                PolicyDocument=json.dumps(policy_document, separators=(",", ":")),
                 Description=policy_description
             )
             print(f"✓ New policy created: {response['Policy']['Arn']}")
@@ -750,6 +755,74 @@ def create_bedrock_agentcore_policy(config):
     except Exception as e:
         print(f"Policy creation failed: {e}")
         return None
+
+
+def create_aws_tavily_invoke_policy(config):
+    """Separate small policy to InvokeAgentRuntime on aws-tavily (us-east-1).
+
+    Kept out of the main AgentCore runtime policy so we stay under the 6144
+    managed-policy size quota.
+    """
+    account_id = config["accountId"]
+    project_name = config.get("projectName", "agentcore")
+    policy_name = f"AmazonBedrockAgentCoreAwsTavilyInvokeFor{project_name}"
+    resource_arns = _aws_tavily_runtime_resource_arns(config)
+    policy_document = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "InvokeAwsTavilyAgentRuntime",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:GetAgentRuntime",
+                    "bedrock-agentcore-control:GetAgentRuntime",
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:InvokeAgentRuntimeWithWebResponse",
+                ],
+                "Resource": resource_arns,
+            }
+        ],
+    }
+    compact = json.dumps(policy_document, separators=(",", ":"))
+
+    try:
+        iam_client = boto3.client("iam")
+        policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
+        try:
+            existing = iam_client.get_policy(PolicyArn=policy_arn)
+            versions = iam_client.list_policy_versions(PolicyArn=policy_arn)["Versions"]
+            if len(versions) >= 5:
+                non_default = [v for v in versions if not v["IsDefaultVersion"]]
+                if non_default:
+                    iam_client.delete_policy_version(
+                        PolicyArn=policy_arn,
+                        VersionId=non_default[0]["VersionId"],
+                    )
+            response = iam_client.create_policy_version(
+                PolicyArn=policy_arn,
+                PolicyDocument=compact,
+                SetAsDefault=True,
+            )
+            print(
+                f"✓ aws-tavily invoke policy updated: "
+                f"{response['PolicyVersion']['VersionId']}"
+            )
+            return existing["Policy"]["Arn"]
+        except iam_client.exceptions.NoSuchEntityException:
+            response = iam_client.create_policy(
+                PolicyName=policy_name,
+                PolicyDocument=compact,
+                Description=(
+                    "Allow AgentCore LangGraph runtime to invoke aws-tavily MCP "
+                    f"({AWS_TAVILY_RUNTIME_NAME} in {AWS_TAVILY_RUNTIME_REGION})"
+                ),
+            )
+            print(f"✓ aws-tavily invoke policy created: {response['Policy']['Arn']}")
+            return response["Policy"]["Arn"]
+    except Exception as e:
+        print(f"aws-tavily invoke policy creation failed: {e}")
+        return None
+
 
 def attach_policy_to_role(role_name, policy_arn):
     """Attach policy to IAM role"""
@@ -771,7 +844,8 @@ def attach_policy_to_role(role_name, policy_arn):
 def create_trust_policy_for_bedrock(config):
     """Trust policy for AgentCore Runtime: service principal only + confused-deputy guards.
 
-    Does not trust account root. SourceArn is limited to this project's runtime name.
+    Does not trust account root. SourceArn covers this project's LangGraph runtime
+    and the remote aws-tavily MCP runtime (us-east-1) that reuses the same role.
     """
     account_id = config["accountId"]
     region = config["region"]
@@ -780,10 +854,22 @@ def create_trust_policy_for_bedrock(config):
     source_arns = [
         f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_name}",
         f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_name}-*",
+        # aws-tavily Marketplace MCP runtime (PUBLIC, us-east-1) shares this role.
+        (
+            f"arn:aws:bedrock-agentcore:{AWS_TAVILY_RUNTIME_REGION}:{account_id}:"
+            f"runtime/{AWS_TAVILY_RUNTIME_NAME}"
+        ),
+        (
+            f"arn:aws:bedrock-agentcore:{AWS_TAVILY_RUNTIME_REGION}:{account_id}:"
+            f"runtime/{AWS_TAVILY_RUNTIME_NAME}-*"
+        ),
     ]
     agent_runtime_arn = (config.get("agent_runtime_arn") or "").strip()
     if agent_runtime_arn and agent_runtime_arn not in source_arns:
         source_arns.append(agent_runtime_arn)
+    aws_tavily_arn = (config.get("aws_tavily_agent_runtime_arn") or "").strip()
+    if aws_tavily_arn and aws_tavily_arn not in source_arns:
+        source_arns.append(aws_tavily_arn)
 
     return {
         "Version": "2012-10-17",
@@ -817,6 +903,11 @@ def create_bedrock_agentcore_role(config):
     if not policy_arn:
         print("Role creation aborted due to policy creation failure")
         return None
+
+    tavily_policy_arn = create_aws_tavily_invoke_policy(config)
+    if not tavily_policy_arn:
+        print("Role creation aborted due to aws-tavily invoke policy failure")
+        return None
     
     try:
         iam_client = boto3.client('iam')
@@ -834,8 +925,9 @@ def create_bedrock_agentcore_role(config):
             )
             print("✓ Trust policy updated successfully")
             
-            # Attach policy
+            # Attach policies
             attach_policy_to_role(role_name, policy_arn)
+            attach_policy_to_role(role_name, tavily_policy_arn)
             
             return existing_role['Role']['Arn']
             
@@ -850,8 +942,9 @@ def create_bedrock_agentcore_role(config):
             )
             print(f"✓ New role created: {response['Role']['Arn']}")
             
-            # Attach policy
+            # Attach policies
             attach_policy_to_role(role_name, policy_arn)
+            attach_policy_to_role(role_name, tavily_policy_arn)
             
             return response['Role']['Arn']
             
