@@ -42,4 +42,21 @@ python3 scripts/write_config.py
 
 이 스크립트는 `application/config.json`과 `runtime_agent/langgraph/config.json`을 갱신합니다.
 
+### Observability / Evaluations / Dashboard (post-deploy)
+
+CDK 스택에는 CloudWatch Dashboard·AgentCore Evaluations·Observability가 아직 없습니다.
+배포 후 boto3 installer와 동일한 헬퍼로 한 번 설정합니다.
+
+```bash
+# config에 agent_runtime_arn이 있는지 확인한 뒤
+python3 scripts/write_config.py
+python3 scripts/setup_observability.py
+
+# 또는 config 갱신과 설정을 한 번에
+python3 scripts/setup_observability.py --refresh-config
+```
+
+순서: Observability (X-Ray Transaction Search / traces) → Online Evaluation → CloudWatch 대시보드.
+결과는 `runtime_agent/langgraph/config.json`의 `cloudwatch_dashboard_name`, `evaluation_*` 키에 저장됩니다.
+
 Knowledge Base RAG는 AgentCore Runtime 환경변수 `KNOWLEDGE_BASE_ID`(Data 스택의 KB ID)로 연결됩니다.
