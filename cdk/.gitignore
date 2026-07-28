@@ -1,0 +1,8 @@
+*.swp
+cython_debug/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+cdk.out/
+.cdk.staging/

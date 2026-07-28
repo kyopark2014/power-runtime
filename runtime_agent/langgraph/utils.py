@@ -31,7 +31,7 @@ def load_config():
         session = boto3.Session()
         region = session.region_name
         config['region'] = region
-        config['projectName'] = "power-trade"
+        config['projectName'] = "power-runtime"
         
         sts = boto3.client("sts")
         response = sts.get_caller_identity()
@@ -55,7 +55,7 @@ if not accountId:
 
 bedrock_region = config.get('region', 'us-west-2')
 logger.info(f"bedrock_region: {bedrock_region}")
-projectName = config.get('projectName', 'power-trade')
+projectName = config.get('projectName', 'power-runtime')
 logger.info(f"projectName: {projectName}")
 
 def get_contents_type(file_name):
