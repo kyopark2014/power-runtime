@@ -2,6 +2,8 @@
 
 Python AWS CDK app that provisions power-runtime infrastructure (VPC, S3 Vectors KB, S3 Files, ALB/CloudFront, AgentCore LangGraph Runtime, ECS).
 
+동일 인프라를 Terraform으로 배포하려면 [`../terraform`](../terraform/)을 사용하세요 (Cognito 없음 / S3 Vectors / LangGraph — CDK와 동일).
+
 루트 `installer.py` / `uninstaller.py`는 **사용하지 않습니다**. CDK가 완성되면 해당 boto3 스크립트는 삭제할 예정입니다.
 
 ## Deploy
@@ -25,6 +27,8 @@ npx aws-cdk@2 deploy --all --app "python3 app.py"
 npx aws-cdk@2 destroy --all --app "python3 app.py" --force
 ```
 
+`storage` 스택은 S3 Files에 pending export가 있어도 `forceDelete`로 지우도록 되어 있습니다. network 삭제가 AgentCore `agentic_ai` ENI 때문에 실패하면 수 분 뒤 destroy를 다시 실행하세요. ENI가 계속 남으면 VPC/subnet/SG를 `--retain-resources`로 스택 레코드만 제거한 뒤, 고아는 AWS Support에 요청해야 할 수 있습니다.
+
 컨테이너 이미지는 프로젝트명이 포함된 ECR 리포지토리를 생성합니다.
 
 - Web UI: `ecr-for-{project_name}` (예: `ecr-for-power-runtime`)
@@ -44,8 +48,7 @@ python3 scripts/write_config.py
 
 ### Observability / Evaluations / Dashboard (post-deploy)
 
-CDK 스택에는 CloudWatch Dashboard·AgentCore Evaluations·Observability가 아직 없습니다.
-배포 후 boto3 installer와 동일한 헬퍼로 한 번 설정합니다.
+CloudWatch Dashboard·AgentCore Evaluations·Observability는 CDK 스택으로 배포하지 않고, 아래와 같이 script로 설치합니다.
 
 ```bash
 # config에 agent_runtime_arn이 있는지 확인한 뒤

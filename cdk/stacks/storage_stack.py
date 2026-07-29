@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from aws_cdk import CfnOutput, Stack
-from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3files as s3files
+from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 from config import PROJECT_NAME, S3_FILES_SESSION_PREFIX
@@ -68,6 +68,44 @@ class StorageStack(Stack):
             accept_bucket_warning=True,
         )
 
+        # CFN DeleteFileSystem does not pass forceDelete; pending S3 export then fails
+        # stack destroy. Create order: FS → ForceDelete → MountTargets → AccessPoint.
+        # Delete order: AP → MT → ForceDelete(force) → FS(already gone = success).
+        force_delete = cr.AwsCustomResource(
+            self,
+            "S3FilesForceDelete",
+            on_create=cr.AwsSdkCall(
+                service="S3Files",
+                action="getFileSystem",
+                parameters={"fileSystemId": self.file_system.attr_file_system_id},
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"s3files-force-delete-{PROJECT_NAME}"
+                ),
+            ),
+            on_delete=cr.AwsSdkCall(
+                service="S3Files",
+                action="deleteFileSystem",
+                parameters={
+                    "fileSystemId": self.file_system.attr_file_system_id,
+                    "forceDelete": True,
+                },
+                ignore_error_codes_matching="ResourceNotFoundException|NotFound",
+            ),
+            install_latest_aws_sdk=True,
+            policy=cr.AwsCustomResourcePolicy.from_statements(
+                [
+                    iam.PolicyStatement(
+                        actions=[
+                            "s3files:GetFileSystem",
+                            "s3files:DeleteFileSystem",
+                        ],
+                        resources=["*"],
+                    )
+                ]
+            ),
+        )
+        force_delete.node.add_dependency(self.file_system)
+
         self.mount_targets = []
         for i, subnet in enumerate(network.vpc.private_subnets):
             mt = s3files.CfnMountTarget(
@@ -77,6 +115,7 @@ class StorageStack(Stack):
                 subnet_id=subnet.subnet_id,
                 security_groups=[network.s3files_mount_sg.security_group_id],
             )
+            mt.node.add_dependency(force_delete)
             self.mount_targets.append(mt)
 
         self.access_point = s3files.CfnAccessPoint(

@@ -77,8 +77,11 @@ class AgentCoreStack(Stack):
                 )
             },
         )
+        runtime_name = agent_runtime_name()
+
         self.runtime_role.add_to_policy(
             iam.PolicyStatement(
+                sid="BedrockModelInvoke",
                 actions=[
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
@@ -88,21 +91,138 @@ class AgentCoreStack(Stack):
                     "bedrock:Retrieve",
                     "bedrock:RetrieveAndGenerate",
                 ],
+                resources=[
+                    "arn:aws:bedrock:*::foundation-model/*",
+                    f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:guardrail/*",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:guardrail-profile/*",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/*",
+                ],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="WorkloadAccessToken",
+                actions=[
+                    "bedrock-agentcore:GetWorkloadAccessToken",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                ],
+                resources=[
+                    (
+                        f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:"
+                        "workload-identity-directory/default/workload-identity/*"
+                    ),
+                ],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ListAgentRuntimes",
+                actions=[
+                    "bedrock-agentcore:ListAgentRuntimes",
+                    "bedrock-agentcore-control:ListAgentRuntimes",
+                ],
                 resources=["*"],
             )
         )
         self.runtime_role.add_to_policy(
             iam.PolicyStatement(
+                sid="GetAndInvokeAgentRuntime",
                 actions=[
-                    "bedrock-agentcore:*",
-                    "s3:GetObject",
-                    "s3:PutObject",
-                    "s3:DeleteObject",
-                    "s3:ListBucket",
+                    "bedrock-agentcore:GetAgentRuntime",
+                    "bedrock-agentcore-control:GetAgentRuntime",
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:InvokeAgentRuntimeWithWebResponse",
+                ],
+                resources=[
+                    (
+                        f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:"
+                        f"runtime/{runtime_name}"
+                    ),
+                    (
+                        f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:"
+                        f"runtime/{runtime_name}-*"
+                    ),
+                    (
+                        f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:"
+                        f"runtime/{runtime_name}/runtime-endpoint/*"
+                    ),
+                    (
+                        f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:"
+                        f"runtime/{runtime_name}-*/runtime-endpoint/*"
+                    ),
+                ],
+            )
+        )
+        # Remote Marketplace Tavily MCP runtime (PUBLIC, us-east-1).
+        # Parity with installer.py create_aws_tavily_invoke_policy.
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InvokeAwsTavilyAgentRuntime",
+                actions=[
+                    "bedrock-agentcore:GetAgentRuntime",
+                    "bedrock-agentcore-control:GetAgentRuntime",
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:InvokeAgentRuntimeWithWebResponse",
+                ],
+                resources=[
+                    (
+                        f"arn:aws:bedrock-agentcore:us-east-1:{self.account}:"
+                        "runtime/agent_runtime_aws_tavily"
+                    ),
+                    (
+                        f"arn:aws:bedrock-agentcore:us-east-1:{self.account}:"
+                        "runtime/agent_runtime_aws_tavily-*"
+                    ),
+                    (
+                        f"arn:aws:bedrock-agentcore:us-east-1:{self.account}:"
+                        "runtime/agent_runtime_aws_tavily/runtime-endpoint/*"
+                    ),
+                    (
+                        f"arn:aws:bedrock-agentcore:us-east-1:{self.account}:"
+                        "runtime/agent_runtime_aws_tavily-*/runtime-endpoint/*"
+                    ),
+                ],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ProjectS3Bucket",
+                actions=["s3:ListBucket", "s3:GetBucketLocation"],
+                resources=[data.bucket.bucket_arn],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ProjectS3Objects",
+                actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+                resources=[data.bucket.arn_for_objects("*")],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="SecretsManagerRead",
+                actions=[
                     "secretsmanager:GetSecretValue",
-                    "logs:CreateLogGroup",
-                    "logs:CreateLogStream",
-                    "logs:PutLogEvents",
+                    "secretsmanager:DescribeSecret",
+                ],
+                resources=[
+                    (
+                        f"arn:aws:secretsmanager:{self.region}:{self.account}:"
+                        f"secret:tavilyapikey-{PROJECT_NAME}*"
+                    ),
+                    (
+                        f"arn:aws:secretsmanager:{self.region}:{self.account}:"
+                        "secret:tavilyapikey-??????"
+                    ),
+                ],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ECRImagePull",
+                actions=[
                     "ecr:GetAuthorizationToken",
                     "ecr:BatchGetImage",
                     "ecr:GetDownloadUrlForLayer",
@@ -113,6 +233,27 @@ class AgentCoreStack(Stack):
         )
         self.runtime_role.add_to_policy(
             iam.PolicyStatement(
+                sid="LogsAccess",
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                ],
+                resources=[
+                    (
+                        f"arn:aws:logs:{self.region}:{self.account}:"
+                        "log-group:/aws/bedrock-agentcore/*"
+                    ),
+                    (
+                        f"arn:aws:logs:{self.region}:{self.account}:"
+                        "log-group:/aws/bedrock-agentcore/*:log-stream:*"
+                    ),
+                ],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="VpcNetworkInterface",
                 actions=[
                     "ec2:CreateNetworkInterface",
                     "ec2:DescribeNetworkInterfaces",
@@ -189,7 +330,6 @@ class AgentCoreStack(Stack):
             )
             container_uri = runtime_image.image_uri
 
-        runtime_name = agent_runtime_name()
         self.runtime = agentcore.CfnRuntime(
             self,
             "AgentRuntime",
