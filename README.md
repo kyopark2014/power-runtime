@@ -2539,6 +2539,10 @@ if chat.memory_enabled:
 
 <img width="800" alt="image" src="https://github.com/user-attachments/assets/7069c737-f72d-4289-8c09-04e8aba806a1" />
 
+질문이 반복된다면 이전 대화내역을 이용해 아래와 같이 답변합니다. 
+
+<img width="832" height="781" alt="image" src="https://github.com/user-attachments/assets/a093e9b4-af95-4c3a-b0b9-880c13765735" />
+
 
 ## Reference 
 
