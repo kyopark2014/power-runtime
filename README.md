@@ -1537,9 +1537,14 @@ python3 scripts/setup_observability.py --refresh-config
 
 #### 6. 삭제
 
+Observability / Evaluations / CloudWatch Dashboard(`{project}-monitoring` 등)는 CDK 스택이 아니라
+[`cdk/scripts/setup_observability.py`](./cdk/scripts/setup_observability.py) 후처리입니다.
+`cdk destroy` 전에 cleanup 스크립트로 지우세요.
+
 ```bash
 cd cdk
 source .venv/bin/activate
+python3 scripts/cleanup_observability.py || true
 npx aws-cdk@2 destroy --all --app "python3 app.py" --force
 ```
 
@@ -1565,7 +1570,13 @@ python3 scripts/setup_observability.py --refresh-config
 
 접속: `terraform output sharing_url` → Web UI에서 `user_id` 입력 후 세션 시작.
 
-삭제: `terraform destroy`
+삭제 — Observability / Evaluations / Dashboard는 Terraform 밖이므로 destroy 전에 정리합니다.
+
+```bash
+cd terraform
+python3 scripts/cleanup_observability.py || true
+terraform destroy
+```
 
 ---
 

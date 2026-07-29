@@ -23,9 +23,14 @@ npx aws-cdk@2 bootstrap
 # 배포
 npx aws-cdk@2 deploy --all --app "python3 app.py"
 
-# 삭제
+# 삭제 — Observability/Evaluations/Dashboard는 스택 밖이므로 먼저 script로 정리
+python3 scripts/cleanup_observability.py || true
 npx aws-cdk@2 destroy --all --app "python3 app.py" --force
 ```
+
+`cleanup_observability.py`가 Online Evaluation config, `{project}-monitoring` CloudWatch
+대시보드, Evaluation IAM role, evaluation 로그 그룹을 제거합니다. CDK `destroy`만으로는
+이 후처리 리소스가 남지 않습니다 (`setup_observability.py`로 설치한 것과 대칭).
 
 `storage` 스택은 S3 Files에 pending export가 있어도 `forceDelete`로 지우도록 되어 있습니다. network 삭제가 AgentCore `agentic_ai` ENI 때문에 실패하면 수 분 뒤 destroy를 다시 실행하세요. ENI가 계속 남으면 VPC/subnet/SG를 `--retain-resources`로 스택 레코드만 제거한 뒤, 고아는 AWS Support에 요청해야 할 수 있습니다.
 
@@ -61,5 +66,11 @@ python3 scripts/setup_observability.py --refresh-config
 
 순서: Observability (X-Ray Transaction Search / traces) → Online Evaluation → CloudWatch 대시보드.
 결과는 `runtime_agent/langgraph/config.json`의 `cloudwatch_dashboard_name`, `evaluation_*` 키에 저장됩니다.
+
+삭제 시(스택 destroy **이전**):
+
+```bash
+python3 scripts/cleanup_observability.py || true
+```
 
 Knowledge Base RAG는 AgentCore Runtime 환경변수 `KNOWLEDGE_BASE_ID`(Data 스택의 KB ID)로 연결됩니다.

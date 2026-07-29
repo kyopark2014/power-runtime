@@ -86,14 +86,25 @@ web_image_uri     = "ACCOUNT.dkr.ecr.REGION.amazonaws.com/ecr-for-power-runtime:
 
 ## 삭제
 
+Observability / Evaluations / CloudWatch Dashboard는 Terraform 상태가 아닙니다.
+`setup_observability.py`로 만들었다면 **destroy 전에** cleanup 스크립트를 실행하세요.
+
 ```bash
+# Observability · Evaluations · Dashboard 정리 ({project}-monitoring 등)
+python3 scripts/cleanup_observability.py || true
+
 terraform destroy
 ```
 
+삭제 대상(스크립트): Online Evaluation config, `{project}-monitoring` 대시보드,
+`AmazonBedrockAgentCoreEvaluationRoleFor{project}` IAM, evaluation 관련 로그 그룹.
+
 S3 버킷·S3 Vectors는 `force_destroy=true`입니다. CloudFront 삭제는 수 분이 걸릴 수 있습니다.
+AgentCore Runtime 삭제 후 `agentic_ai` ENI가 subnet/SG를 잠깐 붙잡을 수 있습니다 — ENI가
+빠질 때까지 기다린 뒤 `terraform destroy`를 재실행하세요.
 
 ## CDK / boto3와의 차이
 
 - CloudFront 서명키: Terraform `tls_private_key` (CDK는 Lambda custom resource)
 - S3 Vectors: Terraform `aws_s3vectors_*` (CDK는 Lambda custom resource)
-- Observability: 스택에 포함하지 않음 — `scripts/setup_observability.py` (CDK와 동일)
+- Observability / Evaluations / Dashboard: 스택에 포함하지 않음 — 설치 `scripts/setup_observability.py`, 삭제 `scripts/cleanup_observability.py` (CDK와 동일)
