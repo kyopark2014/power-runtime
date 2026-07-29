@@ -2525,6 +2525,10 @@ if chat.memory_enabled:
 
 로컬 테스트 시 Web UI를 8501로 띄운 뒤 Memory 토글을 켜고, 선호를 말한 다음(추출이 끝난 뒤) 이후 턴에서 Agent가 `recall_memory`로 불러오는지 확인하면 됩니다.
 
+
+
+
+
 ## 실행 결과
 
 "https://openai.com/index/how-agents-are-transforming-work/ 를 정리해주세요."와 같이 입력하면 웹의 정보를 편리하게 활용할 수 있습니다.
@@ -2541,7 +2545,7 @@ if chat.memory_enabled:
 
 질문이 반복된다면 이전 대화내역을 이용해 아래와 같이 답변합니다. 
 
-<img width="832" height="781" alt="image" src="https://github.com/user-attachments/assets/a093e9b4-af95-4c3a-b0b9-880c13765735" />
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/a093e9b4-af95-4c3a-b0b9-880c13765735" />
 
 
 ## Reference 
