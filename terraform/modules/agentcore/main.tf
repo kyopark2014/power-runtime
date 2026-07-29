@@ -188,11 +188,28 @@ resource "aws_iam_role_policy" "runtime" {
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
         ]
         Resource = [
           "arn:aws:logs:${local.region}:${local.account_id}:log-group:/aws/bedrock-agentcore/*",
           "arn:aws:logs:${local.region}:${local.account_id}:log-group:/aws/bedrock-agentcore/*:log-stream:*",
         ]
+      },
+      {
+        # OTEL → X-Ray / CloudWatch metrics. Parity with installer.py +
+        # AgentCore runtime execution-role docs (sampling APIs).
+        Sid    = "CloudWatchMetricsAndXRay"
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData",
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:PutAttributes",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets",
+        ]
+        Resource = ["*"]
       },
       {
         Sid    = "VpcNetworkInterface"

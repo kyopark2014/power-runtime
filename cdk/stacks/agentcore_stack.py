@@ -238,6 +238,8 @@ class AgentCoreStack(Stack):
                     "logs:CreateLogGroup",
                     "logs:CreateLogStream",
                     "logs:PutLogEvents",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
                 ],
                 resources=[
                     (
@@ -249,6 +251,22 @@ class AgentCoreStack(Stack):
                         "log-group:/aws/bedrock-agentcore/*:log-stream:*"
                     ),
                 ],
+            )
+        )
+        # OTEL → X-Ray / CloudWatch metrics. Parity with installer.py +
+        # AgentCore runtime execution-role docs (sampling APIs).
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="CloudWatchMetricsAndXRay",
+                actions=[
+                    "cloudwatch:PutMetricData",
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                    "xray:PutAttributes",
+                    "xray:GetSamplingRules",
+                    "xray:GetSamplingTargets",
+                ],
+                resources=["*"],
             )
         )
         self.runtime_role.add_to_policy(
