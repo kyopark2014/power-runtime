@@ -509,7 +509,6 @@ function MarkdownText({ content }: { content: string }) {
 | `GET` | `/api/health` | 헬스체크 |
 | `GET`/`POST` | `/api/session` | User ID 세션 조회·생성 (Cookie) |
 | `GET` | `/api/config` | Skill·MCP·Model 목록 및 기본값 |
-| `PATCH` | `/api/config/defaults` | 기본 Skill·MCP 저장 |
 | `GET`/`POST` | `/api/tasks` | 태스크 목록·생성 (`runtime_session_id` 발급) |
 | `GET`/`PATCH`/`DELETE` | `/api/tasks/{id}` | 태스크 조회·수정·삭제 |
 | `GET` | `/api/tasks/{id}/messages` | 태스크 메시지 목록 |
@@ -1457,7 +1456,7 @@ Interceptor는 **인자 형식**만 고칩니다. 아래는 **모델 행동** �
 | **Terraform** | [terraform/](./terraform/), [terraform/README.md](./terraform/README.md) | 선언형 Terraform (IaC 선호 시) |
 | **Boto3 installer** | 루트 [installer.py](./installer.py) | 데모·개발용 임퍼러티브 배포 (레거시) |
 
-cde-pilot과 달리 **Cognito / AgentCore Gateway가 없고**, Knowledge Base는 **S3 Vectors**, Runtime은 **LangGraph**입니다. AgentCore Memory는 boto3 [installer.py](./installer.py)로 프로비저닝합니다. Web UI는 Cognito 로그인 대신 `user_id` 세션을 사용합니다.
+여기서는 사내 시스템과 연동하므로 IdP는 포함하고 있지 않습니다. Knowledge Base는 **S3 Vectors**, Runtime은 **LangGraph**입니다. AgentCore Memory는 boto3 [installer.py](./installer.py)로 프로비저닝합니다. Web UI는 Cognito 로그인 대신 `user_id` 세션을 사용합니다.
 
 ### CDK 배포
 

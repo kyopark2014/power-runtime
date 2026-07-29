@@ -60,14 +60,6 @@ export const api = {
     }),
   clearSession: () => request<void>("/api/session", { method: "DELETE" }),
   getConfig: () => request<AppConfig>("/api/config"),
-  patchDefaults: (body: {
-    default_skills?: string[];
-    default_mcp_servers?: string[];
-  }) =>
-    request<{ ok: boolean }>("/api/config/defaults", {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
   listTasks: () => request<{ tasks: Task[] }>("/api/tasks"),
   createTask: (body: Partial<Task>) =>
     request<Task>("/api/tasks", {
