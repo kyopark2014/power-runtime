@@ -29,8 +29,8 @@ project_name = "power-runtime" # at least 3 characters
 region = "us-west-2"
 git_name = "power-runtime"
 # SSE streaming: long tool runs can go 30s+ without tokens; CloudFront/ALB must stay open.
-SSE_ORIGIN_READ_TIMEOUT_SECONDS = 120
-ALB_IDLE_TIMEOUT_SECONDS = 120
+SSE_ORIGIN_READ_TIMEOUT_SECONDS = 600
+ALB_IDLE_TIMEOUT_SECONDS = 600
 
 
 def agent_runtime_name(project_name: str) -> str:

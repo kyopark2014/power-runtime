@@ -35,12 +35,12 @@ variable "app_port" {
 
 variable "sse_origin_read_timeout_seconds" {
   type    = number
-  default = 120
+  default = 600
 }
 
 variable "alb_idle_timeout_seconds" {
   type    = number
-  default = 120
+  default = 600
 }
 
 variable "custom_header_name" {
