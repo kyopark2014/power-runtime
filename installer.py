@@ -29,7 +29,8 @@ project_name = "power-runtime" # at least 3 characters
 region = "us-west-2"
 git_name = "power-runtime"
 # SSE streaming: long tool runs can go 30s+ without tokens; CloudFront/ALB must stay open.
-SSE_ORIGIN_READ_TIMEOUT_SECONDS = 600
+# CloudFront OriginReadTimeout account max is typically 60–120s (ALB idle can be higher).
+SSE_ORIGIN_READ_TIMEOUT_SECONDS = 60
 ALB_IDLE_TIMEOUT_SECONDS = 600
 
 

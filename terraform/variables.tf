@@ -35,7 +35,7 @@ variable "app_port" {
 
 variable "sse_origin_read_timeout_seconds" {
   type    = number
-  default = 600
+  default = 60 # CloudFront OriginReadTimeout (account max typically 60–120s)
 }
 
 variable "alb_idle_timeout_seconds" {

@@ -7,7 +7,8 @@ import os
 PROJECT_NAME = os.environ.get("CDE_PROJECT_NAME", "power-runtime")
 REGION = os.environ.get("CDE_REGION", "us-west-2")
 
-SSE_ORIGIN_READ_TIMEOUT_SECONDS = 600
+# CloudFront OriginReadTimeout account max is typically 60–120s.
+SSE_ORIGIN_READ_TIMEOUT_SECONDS = 60
 ALB_IDLE_TIMEOUT_SECONDS = 600
 CUSTOM_HEADER_NAME = "X-Custom-Header"
 APP_PORT = 8501
