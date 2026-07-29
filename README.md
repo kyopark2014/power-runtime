@@ -1448,19 +1448,144 @@ Interceptor는 **인자 형식**만 고칩니다. 아래는 **모델 행동** �
 
 ## 배포하기
 
-아래와 같이 EC2를 이용해 배포 환경을 구성합니다.
+인프라 배포는 아래 세 가지 중 **하나만** 선택합니다. 같은 AWS 계정에서 동일한 `project_name`으로 CDK·Terraform·boto3를 동시에 적용하면 리소스 이름 충돌이 납니다.
 
-1. AWS Console의 EC2에 접속해서 [Launch instance]를 선택합니다.
+| 방식 | 경로 | 용도 |
+|------|------|------|
+| **CDK** | [cdk/](./cdk/), [cdk/README.md](./cdk/README.md) | 선언형 CloudFormation (상용 권장) |
+| **Terraform** | [terraform/](./terraform/), [terraform/README.md](./terraform/README.md) | 선언형 Terraform (IaC 선호 시) |
+| **Boto3 installer** | 루트 [installer.py](./installer.py) | 데모·개발용 임퍼러티브 배포 (레거시) |
+
+cde-pilot과 달리 **Cognito / AgentCore Gateway / AgentCore Memory가 없고**, Knowledge Base는 **S3 Vectors**, Runtime은 **LangGraph**입니다. Web UI는 Cognito 로그인 대신 `user_id` 세션을 사용합니다.
+
+### CDK 배포
+
+[cdk/](./cdk/) Python AWS CDK 앱이 VPC·S3 Vectors Knowledge Base·Secrets·S3 Files·ALB/CloudFront·AgentCore LangGraph Runtime·ECS Web UI를 한 번에 프로비저닝합니다. 기본 프로젝트명·리전은 [cdk/config.py](./cdk/config.py)의 `PROJECT_NAME`(기본 `power-runtime`), `REGION`(기본 `us-west-2`)입니다. 환경변수 `CDE_PROJECT_NAME` / `CDE_REGION`으로 덮어쓸 수 있습니다.
+
+#### 1. 사전 준비
+
+| 항목 | 설명 |
+|------|------|
+| AWS 자격 증명 | AWS CLI 프로필 또는 `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION` |
+| Docker | ECS·AgentCore 이미지 빌드 (`linux/arm64`) |
+| Node.js | `npx`로 AWS CDK CLI 실행 |
+| Python | 3.12+ (`cdk/` venv) |
+
+#### 2. 스택 구성
+
+| 스택 | 리전 | 역할 |
+|------|------|------|
+| `{project}-network` | primary | VPC, NAT, VPC Endpoint, Security Group |
+| `{project}-data` | primary | S3, S3 Vectors, Bedrock Knowledge Base |
+| `{project}-secrets` | primary | ALB origin / session / CloudFront signing (Cognito 없음) |
+| `{project}-storage` | primary | S3 Files (AgentCore session `/mnt/workspace`) |
+| `{project}-edge` | primary | ALB, CloudFront |
+| `{project}-agentcore` | primary | AgentCore Runtime (LangGraph) |
+| `{project}-compute` | primary | ECS Web UI |
+
+의존 관계는 `network`/`data`/`secrets` → `storage`/`edge` → `agentcore` → `compute` 순입니다.
+
+#### 3. 배포
+
+```bash
+cd cdk
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# 계정/리전 최초 1회
+npx aws-cdk@2 bootstrap
+
+# Docker Desktop: docker-container buildx 드라이버면 CDK 이미지 push가
+# "tag does not exist"로 실패할 수 있음. 배포 전 docker 드라이버로 전환:
+#   docker buildx use desktop-linux
+
+# 전체 스택 배포
+npx aws-cdk@2 deploy --all --app "python3 app.py"
+```
+
+컨테이너 이미지는 프로젝트명이 포함된 ECR 리포지토리를 생성합니다.
+
+- Web UI: `ecr-for-{project_name}` (예: `ecr-for-power-runtime`)
+- AgentCore Runtime: `{project_name}_langgraph` (예: `power-runtime_langgraph`)
+
+#### 4. 설정 반영
+
+배포 후 CloudFormation Outputs를 로컬 config에 반영합니다.
+
+```bash
+python3 scripts/write_config.py
+```
+
+| 파일 | 용도 |
+|------|------|
+| `application/config.json` | Web UI(ECS) 런타임 설정 |
+| `runtime_agent/langgraph/config.json` | 로컬/참고용 (gitignore) |
+
+RAG용 Knowledge Base ID는 AgentCore Runtime 환경변수 `KNOWLEDGE_BASE_ID`로도 주입됩니다. 로컬 runtime config가 이미지에 없어도 동작합니다.
+
+Observability / Evaluations / CloudWatch Dashboard는 스택에 포함되지 않습니다. 배포 후 한 번 설정합니다.
+
+```bash
+python3 scripts/setup_observability.py --refresh-config
+```
+
+#### 5. 접속
+
+1. edge 스택 Output `SharingUrl`(CloudFront URL)로 접속합니다.
+2. Web UI에서 `user_id`를 입력한 뒤 New task를 생성합니다.
+3. Knowledge Base에 문서를 쓰려면 [Knowledge Base 문서 동기화](#knowledge-base-문서-동기화-하기)를 진행합니다.
+
+#### 6. 삭제
+
+```bash
+cd cdk
+source .venv/bin/activate
+npx aws-cdk@2 destroy --all --app "python3 app.py" --force
+```
+
+`storage` 스택은 S3 Files pending export가 있어도 `forceDelete`로 지우도록 되어 있습니다. network 삭제가 AgentCore ENI 때문에 실패하면 수 분 뒤 destroy를 다시 실행하세요. ENI가 계속 남으면 VPC/subnet/SG를 `--retain-resources`로 스택 레코드만 제거한 뒤, 고아는 AWS Support에 요청해야 할 수 있습니다.
+
+모든 CDK 스택과 관련 리소스(VPC, KB, S3 Files, AgentCore Runtime, ECS 등)가 제거됩니다. 기존에 남아 있는 레거시 boto3 리소스는 건드리지 않습니다.
+
+---
+
+### Terraform 배포
+
+[terraform/](./terraform/)이 CDK와 동일한 모듈 구성(network·data·secrets·storage·edge·agentcore·compute)으로 인프라를 프로비저닝합니다. 상세는 [terraform/README.md](./terraform/README.md)를 참고합니다.
+
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars   # project_name / region 확인
+terraform init
+terraform apply
+
+python3 scripts/write_config.py
+python3 scripts/setup_observability.py --refresh-config
+```
+
+접속: `terraform output sharing_url` → Web UI에서 `user_id` 입력 후 세션 시작.
+
+삭제: `terraform destroy`
+
+---
+
+### Boto3로 배포
+
+아래는 EC2 + 루트 `installer.py`를 이용한 배포 절차입니다. 데모 시연 및 개발 환경구성에 적합합니다. 상용은 CDK 또는 Terraform을 권장합니다.
+
+#### 1. EC2 환경 구성
+
+1. AWS Console의 EC2에서 [Launch instance]를 선택합니다.
 
 <img width="970" height="212" alt="image" src="https://github.com/user-attachments/assets/d6b0cb61-7de2-4436-9634-efc6700842d3" />
 
-2. ECS/AgentCore 이미지는 `linux/arm64`로 빌드하므로, EC2 생성시 Architecture로 **Arm64**을 선택하고 나머지는 기본값으로 생성합니다.  
+2. ECS/AgentCore 이미지는 `linux/arm64`로 빌드하므로, Architecture로 **Arm64**을 선택하고 나머지는 기본값으로 생성합니다.
 
 <img width="156" height="119" alt="image" src="https://github.com/user-attachments/assets/5a09e50d-e57b-46c7-9a3f-296a2f197ac8" />
 
-3. 생성한 EC2를 선택하여 [Connect] - [EC2 Instance Connect]로 접속합니다. 이후 아래와 같이 git과 **Python 3.12**를 설치합니다.
+3. [Connect] - [EC2 Instance Connect]로 접속한 뒤 git과 **Python 3.12**를 설치합니다.
 
-Amazon Linux 2023의 기본 `python3`는 3.9입니다. AgentCore Web Search gateway(`targetConfiguration.mcp.connector`)는 **boto3 >= 1.43.32**가 필요하고, 이 버전은 **Python 3.10+**에서만 설치됩니다. 따라서 installer는 `python3.12` + venv로 실행하세요. `/usr/bin/python3` 심볼릭 링크는 바꾸지 마세요.
+Amazon Linux 2023의 기본 `python3`는 3.9입니다. installer는 `python3.12` + venv로 실행하세요. `/usr/bin/python3` 심볼릭 링크는 바꾸지 마세요.
 
 ```bash
 cat /etc/os-release
@@ -1495,27 +1620,25 @@ newgrp docker
 docker info
 ```
 
-5. Workshop의 경우에 아래 형태로 된 Credential을 복사하여 EC2 터미널에 입력합니다.
+5. Workshop의 경우 Credential을 복사하여 EC2 터미널에 입력합니다.
 
 <img width="700" alt="credential" src="https://github.com/user-attachments/assets/261a24c4-8a02-46cb-892a-02fb4eec4551" />
 
-
-6. 아래와 같이 git source를 가져옵니다.
+6. git source를 가져옵니다.
 
 ```bash
 git clone https://github.com/kyopark2014/power-runtime
 cd power-runtime
 ```
 
-7. Python 3.12 가상환경을 만들고 boto3를 설치한 뒤, [installer.py](./installer.py)로 배포합니다.
+#### 2. installer 실행
+
+Python 3.12 가상환경을 만들고 boto3를 설치한 뒤, [installer.py](./installer.py)로 배포합니다.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install boto3
-
-# boto3/botocore가 1.43.32 이상인지 확인
-python -c "import boto3, botocore; print(boto3.__version__, botocore.__version__)"
 
 python installer.py
 ```
@@ -1526,18 +1649,19 @@ python installer.py
 python installer.py --skip-docker-build
 ```
 
-8. 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. User ID를 입력한 뒤 New task를 생성하고, 적절한 MCP·Skill을 선택하여 원하는 작업을 수행합니다.
+설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. User ID를 입력한 뒤 New task를 생성하고, 적절한 MCP·Skill을 선택하여 원하는 작업을 수행합니다.
 
-9. 인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다. AgentCore Runtime, S3 Files, VPC, ECS, Knowledge Base와 함께 `application/config.json`도 정리됩니다.
+#### 3. 인프라 삭제
+
+인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다. AgentCore Runtime, S3 Files, VPC, ECS, Knowledge Base와 함께 `application/config.json`도 정리됩니다.
 
 ```bash
 source .venv/bin/activate
 python uninstaller.py
 ```
 
-**참고 (트러블슈팅)**
+#### 4. 트러블슈팅
 
-- `Unknown parameter in targetConfiguration.mcp: "connector"` → boto3가 오래됨. Python 3.12 venv에서 `pip install --upgrade 'boto3>=1.43.32'` 후 재실행.
 - `additional instances of driver "docker" cannot be created` → installer가 기존 buildx builder를 재사용하거나 classic `docker build`로 fallback합니다. `git pull`로 최신 installer를 받으세요.
 - `Cannot connect to the Docker daemon` → `sudo systemctl start docker` 후 `docker info`로 확인하세요.
 
