@@ -29,8 +29,10 @@ resource "aws_lb_target_group" "ecs" {
     matcher             = "200"
   }
 
+  # app_cookie on agent_user_id — avoids AWSALB/AWSALBCORS (no configurable Secure/HttpOnly)
   stickiness {
-    type            = "lb_cookie"
+    type            = "app_cookie"
+    cookie_name     = "agent_user_id"
     cookie_duration = 86400
     enabled         = true
   }

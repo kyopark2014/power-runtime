@@ -60,7 +60,9 @@ class EdgeStack(Stack):
                 healthy_threshold_count=2,
                 unhealthy_threshold_count=3,
             ),
+            # app_cookie on agent_user_id — avoids AWSALB/AWSALBCORS (no Secure/HttpOnly)
             stickiness_cookie_duration=Duration.days(1),
+            stickiness_cookie_name="agent_user_id",
         )
 
         origin_header_value = secrets.origin_header_secret.secret_value.unsafe_unwrap()
