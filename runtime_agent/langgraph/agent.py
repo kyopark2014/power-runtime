@@ -252,6 +252,17 @@ async def agent_langgraph(payload):
         last_tool_args_json: dict[str, str] = {}
         yielded_tool_ids: set[str] = set()
         partial_json_tools: set[str] = set()
+        stop_reason: str | None = None
+
+        def remember_stop_reason(message) -> None:
+            nonlocal stop_reason
+            meta = getattr(message, "response_metadata", None) or {}
+            if not isinstance(meta, dict):
+                return
+            reason = meta.get("stopReason") or meta.get("stop_reason")
+            if reason:
+                stop_reason = reason
+                logger.info(f"[stop_reason] {stop_reason}")
 
         def remember_tool_args(tool_use_id: str, tool_name: str, args) -> dict | None:
             if not tool_use_id or not tool_name:
@@ -345,6 +356,7 @@ async def agent_langgraph(payload):
             chunk = stream[0] if isinstance(stream, (list, tuple)) and stream else stream
 
             if isinstance(chunk, AIMessageChunk):
+                remember_stop_reason(chunk)
                 content = chunk.content
                 if isinstance(content, str) and content:
                     if tool_used:
@@ -444,6 +456,7 @@ async def agent_langgraph(payload):
                             yield payload
 
             elif isinstance(chunk, AIMessage):
+                remember_stop_reason(chunk)
                 content = chunk.content
                 text_parts = []
                 if isinstance(content, str) and content:
@@ -535,10 +548,31 @@ async def agent_langgraph(payload):
             if payload:
                 yield payload
 
-        if not result_text.strip():
+        # Final stop_reason wins even when earlier turns left preamble text
+        # (e.g. "확인해보겠습니다" + tools, then empty refusal).
+        skip_memory = False
+        if stop_reason == "content_filtered":
+            result_text = (
+                "요청이 모델 안전 정책에 의해 차단되었습니다. "
+                "다른 모델로 시도하거나 질문을 바꿔 주세요."
+            )
+            skip_memory = True
+        elif stop_reason == "guardrail_intervened":
+            result_text = (
+                "요청이 Guardrail 안전 정책에 의해 차단되었습니다. "
+                "질문을 바꿔 주세요."
+            )
+            skip_memory = True
+        elif stop_reason == "refusal":
+            result_text = (
+                "모델이 이 요청에 대한 응답을 거부했습니다. "
+                "다른 모델로 시도하거나 질문을 바꿔 주세요."
+            )
+            skip_memory = True
+        elif not result_text.strip():
             result_text = "답변을 찾지 못하였습니다."
 
-        if chat.memory_enabled:
+        if chat.memory_enabled and not skip_memory:
             chat.save_to_memory(query, result_text)
 
         final_output = {
