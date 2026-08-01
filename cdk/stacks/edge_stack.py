@@ -112,6 +112,7 @@ class EdgeStack(Stack):
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
                 origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER,
+                response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
             ),
             additional_behaviors={
                 path: cloudfront.BehaviorOptions(
@@ -120,6 +121,7 @@ class EdgeStack(Stack):
                     allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD,
                     cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                     trusted_key_groups=[key_group],
+                    response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
                 )
                 for path in ("/images/*", "/docs/*", "/artifacts/*")
             },
