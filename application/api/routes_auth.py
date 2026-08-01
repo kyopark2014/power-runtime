@@ -106,8 +106,13 @@ def clear_session(request: Request, response: Response) -> None:
     cloudfront_cookies.clear_signed_cookies(response, secure=secure)
 
 
+def get_optional_user_id(request: Request) -> str | None:
+    """Return user_id from the session cookie, or None."""
+    return (request.cookies.get(SESSION_COOKIE) or "").strip() or None
+
+
 def require_user_id(request: Request) -> str:
-    user_id = request.cookies.get(SESSION_COOKIE)
+    user_id = get_optional_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="User session required")
     return user_id

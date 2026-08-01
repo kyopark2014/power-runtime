@@ -1,12 +1,14 @@
 import logging
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 try:
     from application import utils
+    from application.api.routes_auth import get_optional_user_id
 except ImportError:
     import utils
+    from routes_auth import get_optional_user_id  # type: ignore
 
 logger = logging.getLogger("routes_config")
 
@@ -51,8 +53,24 @@ def load_capability_list(filename: str) -> list[str]:
         return []
 
 
+def _public_config() -> dict:
+    config = utils.load_config()
+    return {
+        "projectName": config.get("projectName", "agent"),
+    }
+
+
 @router.get("")
-def get_config():
+def get_config(request: Request):
+    """Return public auth bootstrap fields; full catalogs only when logged in.
+
+    Unauthenticated clients get only what the login screen needs (project name).
+    Model / MCP / skill catalogs require a session.
+    """
+    public = _public_config()
+    if not get_optional_user_id(request):
+        return public
+
     skill_options = load_capability_list("skills.list")
     mcp_options = load_capability_list("mcp.list")
     default_skills, default_mcp = utils.get_initial_tool_defaults()
@@ -62,9 +80,8 @@ def get_config():
         default_skills = ["skill-creator"]
     if not default_mcp:
         logger.info("No initial MCP defaults matched current capability list")
-    config = utils.load_config()
     return {
-        "projectName": config.get("projectName", "agent"),
+        **public,
         "skills": skill_options,
         "mcp_servers": mcp_options,
         "models": MODELS,

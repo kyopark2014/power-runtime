@@ -5,6 +5,7 @@ import { formatBrandTitle } from "./formatBrandTitle";
 import { useChatStream } from "./hooks/useChatStream";
 import { randomUUID } from "./randomUUID";
 import type { AppConfig, Message, Task } from "./types";
+import { hasAuthenticatedConfig } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
@@ -77,6 +78,12 @@ export default function App() {
     return sortTasks(rows);
   }, []);
 
+  const refreshConfig = useCallback(async () => {
+    const latest = await api.getConfig();
+    setConfig(latest);
+    return latest;
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
@@ -102,7 +109,7 @@ export default function App() {
   }, [config?.projectName, userId]);
 
   useEffect(() => {
-    if (!userId || !config) return;
+    if (!userId || !hasAuthenticatedConfig(config)) return;
     if (tasksBootstrappedForUserRef.current === userId) return;
 
     let cancelled = false;
@@ -118,8 +125,8 @@ export default function App() {
             if (latest.length > 0) return latest[0];
             return api.createTask({
               model_name: config.default_model,
-              skills: config.default_skills,
-              mcp_servers: config.default_mcp_servers,
+              skills: config.default_skills ?? [],
+              mcp_servers: config.default_mcp_servers ?? [],
               memory_enabled: true,
             });
           })();
@@ -174,6 +181,7 @@ export default function App() {
     setBootError(null);
     try {
       await api.setSession(id);
+      await refreshConfig();
       setUserId(id.trim());
     } catch (err) {
       setBootError(err instanceof Error ? err.message : String(err));
@@ -182,6 +190,7 @@ export default function App() {
 
   async function handleLogout() {
     setBootError(null);
+    const projectName = config?.projectName;
     try {
       await api.clearSession();
     } catch (err) {
@@ -194,17 +203,23 @@ export default function App() {
     setActiveTaskId(null);
     setMessages([]);
     setDrawer(null);
-    if (config?.projectName) {
-      document.title = formatBrandTitle(config.projectName);
+    try {
+      await refreshConfig();
+    } catch (err) {
+      uiError("config refresh after logout failed", err);
+      setConfig((prev) => (prev ? { projectName: prev.projectName } : null));
+    }
+    if (projectName) {
+      document.title = formatBrandTitle(projectName);
     }
   }
 
   async function handleNewTask() {
-    if (!config) return;
+    if (!hasAuthenticatedConfig(config)) return;
     const task = await api.createTask({
       model_name: activeTask?.model_name ?? config.default_model,
-      skills: activeTask?.skills ?? config.default_skills,
-      mcp_servers: activeTask?.mcp_servers ?? config.default_mcp_servers,
+      skills: activeTask?.skills ?? config.default_skills ?? [],
+      mcp_servers: activeTask?.mcp_servers ?? config.default_mcp_servers ?? [],
       guardrail_enabled: activeTask?.guardrail_enabled ?? false,
       memory_enabled: activeTask?.memory_enabled ?? true,
     });

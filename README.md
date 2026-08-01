@@ -508,7 +508,7 @@ function MarkdownText({ content }: { content: string }) {
 |--------|------|------|
 | `GET` | `/api/health` | 헬스체크 |
 | `GET`/`POST` | `/api/session` | User ID 세션 조회·생성 (Cookie) |
-| `GET` | `/api/config` | Skill·MCP·Model 목록 및 기본값 |
+| `GET` | `/api/config` | 로그인 전: projectName만. 인증 후: Skill·MCP·Model 목록 및 기본값 |
 | `GET`/`POST` | `/api/tasks` | 태스크 목록·생성 (`runtime_session_id` 발급) |
 | `GET`/`PATCH`/`DELETE` | `/api/tasks/{id}` | 태스크 조회·수정·삭제 |
 | `GET` | `/api/tasks/{id}/messages` | 태스크 메시지 목록 |
