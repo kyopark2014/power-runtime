@@ -95,6 +95,44 @@ resource "aws_s3_bucket_policy" "oai" {
   policy = data.aws_iam_policy_document.s3_oai.json
 }
 
+resource "aws_cloudfront_response_headers_policy" "security" {
+  name    = "${var.project_name}-security-headers"
+  comment = "Security headers for ${var.project_name}; strip origin Server"
+
+  security_headers_config {
+    content_type_options {
+      override = true
+    }
+    frame_options {
+      frame_option = "DENY"
+      override     = true
+    }
+    referrer_policy {
+      referrer_policy = "strict-origin-when-cross-origin"
+      override        = true
+    }
+    strict_transport_security {
+      access_control_max_age_sec = 31536000
+      include_subdomains         = true
+      override                   = true
+    }
+    xss_protection {
+      protection = true
+      mode_block = true
+      override   = true
+    }
+  }
+
+  remove_headers_config {
+    items {
+      header = "Server"
+    }
+    items {
+      header = "X-Powered-By"
+    }
+  }
+}
+
 resource "aws_cloudfront_distribution" "this" {
   enabled             = true
   comment             = "Distribution for ${var.project_name}"
@@ -139,7 +177,7 @@ resource "aws_cloudfront_distribution" "this" {
 
     cache_policy_id            = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
     origin_request_policy_id   = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AllViewer
-    response_headers_policy_id = "67f7725c-6f97-4210-82d7-5512b31e9d03" # SecurityHeadersPolicy
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id
   }
 
   dynamic "ordered_cache_behavior" {
@@ -152,7 +190,7 @@ resource "aws_cloudfront_distribution" "this" {
       cached_methods             = ["GET", "HEAD"]
       compress                   = true
       cache_policy_id            = "658327ea-f89d-4fab-a63d-7e88639e58f6" # CachingOptimized
-      response_headers_policy_id = "67f7725c-6f97-4210-82d7-5512b31e9d03" # SecurityHeadersPolicy
+      response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id
       trusted_key_groups         = [var.cloudfront_key_group_id]
     }
   }

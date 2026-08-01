@@ -104,6 +104,38 @@ class EdgeStack(Stack):
 
         s3_origin = origins.S3BucketOrigin.with_origin_access_identity(bucket)
 
+        # Custom policy: managed-equivalent security headers + strip origin Server (uvicorn).
+        response_headers_policy = cloudfront.ResponseHeadersPolicy(
+            self,
+            "SecurityHeaders",
+            response_headers_policy_name=f"{PROJECT_NAME}-security-headers",
+            comment=f"Security headers for {PROJECT_NAME}; strip origin Server",
+            security_headers_behavior=cloudfront.ResponseSecurityHeadersBehavior(
+                content_type_options=cloudfront.ResponseHeadersContentTypeOptions(
+                    override=True
+                ),
+                frame_options=cloudfront.ResponseHeadersFrameOptions(
+                    frame_option=cloudfront.HeadersFrameOption.DENY,
+                    override=True,
+                ),
+                referrer_policy=cloudfront.ResponseHeadersReferrerPolicy(
+                    referrer_policy=cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+                    override=True,
+                ),
+                strict_transport_security=cloudfront.ResponseHeadersStrictTransportSecurity(
+                    access_control_max_age=Duration.seconds(31536000),
+                    include_subdomains=True,
+                    override=True,
+                ),
+                xss_protection=cloudfront.ResponseHeadersXSSProtection(
+                    protection=True,
+                    mode_block=True,
+                    override=True,
+                ),
+            ),
+            remove_headers=["Server", "X-Powered-By"],
+        )
+
         self.distribution = cloudfront.Distribution(
             self,
             f"cf-for-{PROJECT_NAME}",
@@ -114,7 +146,7 @@ class EdgeStack(Stack):
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
                 origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER,
-                response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+                response_headers_policy=response_headers_policy,
             ),
             additional_behaviors={
                 path: cloudfront.BehaviorOptions(
@@ -123,7 +155,7 @@ class EdgeStack(Stack):
                     allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD,
                     cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                     trusted_key_groups=[key_group],
-                    response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+                    response_headers_policy=response_headers_policy,
                 )
                 for path in ("/images/*", "/docs/*", "/artifacts/*")
             },
