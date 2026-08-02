@@ -39,8 +39,7 @@ MODELS = [
 DEFAULT_MODEL = "Claude 4.6 Sonnet"
 
 
-def load_capability_list(filename: str) -> list[str]:
-    path = os.path.join(_APPLICATION_DIR, filename)
+def load_capability_list_from_path(path: str) -> list[str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return [
@@ -51,6 +50,11 @@ def load_capability_list(filename: str) -> list[str]:
     except FileNotFoundError:
         logger.warning("Capability list not found: %s", path)
         return []
+
+
+def load_capability_list(filename: str) -> list[str]:
+    path = os.path.join(_APPLICATION_DIR, filename)
+    return load_capability_list_from_path(path)
 
 
 def _public_config() -> dict:
@@ -68,10 +72,14 @@ def get_config(request: Request):
     Model / MCP / skill catalogs require a session.
     """
     public = _public_config()
-    if not get_optional_user_id(request):
+    session_user = get_optional_user_id(request)
+    if not session_user:
         return public
 
-    skill_options = load_capability_list("skills.list")
+    # Shared S3 Files mount with AgentCore: preserve runtime-updated skills.list.
+    skills_path = utils.ensure_user_skills_list(session_user)
+    skill_options = load_capability_list_from_path(skills_path)
+    logger.info("Loaded skills from %s (%d)", skills_path, len(skill_options))
     mcp_options = load_capability_list("mcp.list")
     default_skills, default_mcp = utils.get_initial_tool_defaults()
     default_skills = [s for s in default_skills if s in skill_options]

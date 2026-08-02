@@ -200,7 +200,16 @@ resource "null_resource" "docker_build" {
       TAG="${local.image_tag}"
       CONTEXT="${var.repo_root}"
       cp -f "$CONTEXT/runtime_agent/langgraph/mcp.list" "$CONTEXT/application/mcp.list" 2>/dev/null || true
-      cp -f "$CONTEXT/runtime_agent/langgraph/skills.list" "$CONTEXT/application/skills.list" 2>/dev/null || true
+      # Rebuild application/skills.list from skills/*/SKILL.md (runtime has no skills.list)
+      SKILLS_DIR="$CONTEXT/runtime_agent/langgraph/skills"
+      LIST_PATH="$CONTEXT/application/skills.list"
+      : > "$LIST_PATH"
+      if [ -d "$SKILLS_DIR" ]; then
+        for d in "$SKILLS_DIR"/*; do
+          [ -d "$d" ] && [ -f "$d/SKILL.md" ] || continue
+          basename "$d"
+        done | LC_ALL=C sort -u > "$LIST_PATH"
+      fi
       aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${local.account_id}.dkr.ecr.${local.region}.amazonaws.com"
       docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
         -t "$REPO:$TAG" -t "$REPO:latest" \
@@ -251,6 +260,8 @@ resource "aws_ecs_task_definition" "app" {
       { name = "CLOUDFRONT_KEY_PAIR_ID", value = var.cloudfront_public_key_id },
       { name = "TASK_DB_MOUNT", value = var.app_data_mount_path },
       { name = "TASK_DB_PROJECT", value = var.project_name },
+      # Same S3 Files root as AgentCore /mnt/workspace (skills.list, skills/).
+      { name = "SESSION_STORAGE_DIR", value = var.app_data_mount_path },
     ]
     secrets = [
       {

@@ -303,6 +303,8 @@ class ComputeStack(Stack):
                 "CLOUDFRONT_KEY_PAIR_ID": secrets.cf_signing.get_att_string("PublicKeyId"),
                 "TASK_DB_MOUNT": APP_DATA_MOUNT_PATH,
                 "TASK_DB_PROJECT": PROJECT_NAME,
+                # Same S3 Files root as AgentCore /mnt/workspace (skills.list, skills/).
+                "SESSION_STORAGE_DIR": APP_DATA_MOUNT_PATH,
             },
             secrets={
                 "SESSION_SIGNING_KEY": ecs.Secret.from_secrets_manager(
