@@ -6,8 +6,10 @@ from pydantic import BaseModel, Field
 
 try:
     from application import cloudfront_cookies
+    from application import utils
 except ImportError:
     import cloudfront_cookies
+    import utils
 
 logger = logging.getLogger("routes_auth")
 
@@ -79,6 +81,7 @@ def set_session(body: SessionRequest, request: Request, response: Response) -> S
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
     _set_user_cookie(response, request, user_id)
+    utils.ensure_user_artifacts_dir(user_id)
     return SessionResponse(user_id=user_id)
 
 
@@ -87,6 +90,7 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
     user_id = (request.cookies.get(SESSION_COOKIE) or "").strip()
     if not user_id:
         return None
+    utils.ensure_user_artifacts_dir(user_id)
     if not cloudfront_cookies.set_signed_cookies(
         response,
         secure=_cookie_secure(request),
