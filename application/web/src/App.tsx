@@ -11,7 +11,7 @@ import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
 import { UserIdModal } from "./components/UserIdModal";
 
-type DrawerKind = "skill" | "mcp" | "model" | null;
+type DrawerKind = "skill" | "mcp" | "model" | "appearance" | null;
 
 function sortTasks(tasks: Task[]): Task[] {
   return [...tasks].sort((a, b) => {
