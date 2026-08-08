@@ -10,6 +10,7 @@ from aws_cdk import aws_bedrockagentcore as agentcore
 from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_ecr_assets as ecr_assets
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_s3files as s3files
 from constructs import Construct
 
 from config import (
@@ -188,17 +189,82 @@ class AgentCoreStack(Stack):
         )
         self.runtime_role.add_to_policy(
             iam.PolicyStatement(
-                sid="ProjectS3Bucket",
-                actions=["s3:ListBucket", "s3:GetBucketLocation"],
+                sid="ProjectS3BucketMeta",
+                actions=["s3:GetBucketLocation"],
                 resources=[data.bucket.bucket_arn],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ProjectS3ListAllowedPrefixes",
+                actions=["s3:ListBucket"],
+                resources=[data.bucket.bucket_arn],
+                conditions={
+                    "StringLike": {
+                        "s3:prefix": [
+                            "artifacts",
+                            "artifacts/*",
+                            "images",
+                            "images/*",
+                            "docs",
+                            "docs/*",
+                        ]
+                    }
+                },
             )
         )
         self.runtime_role.add_to_policy(
             iam.PolicyStatement(
                 sid="ProjectS3Objects",
                 actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-                resources=[data.bucket.arn_for_objects("*")],
+                resources=[
+                    data.bucket.arn_for_objects("artifacts/*"),
+                    data.bucket.arn_for_objects("images/*"),
+                    data.bucket.arn_for_objects("docs/*"),
+                ],
             )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="DenySensitiveS3Prefixes",
+                effect=iam.Effect.DENY,
+                actions=[
+                    "s3:GetObject",
+                    "s3:GetObjectVersion",
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                ],
+                resources=[
+                    data.bucket.arn_for_objects("app-data/*"),
+                    data.bucket.arn_for_objects("agentcore-sessions/*"),
+                ],
+            )
+        )
+        # Session FS policy: Runtime only (ECS uses dedicated app-data FS).
+        s3files.CfnFileSystemPolicy(
+            self,
+            "S3FilesSessionFileSystemPolicy",
+            file_system_id=storage.file_system_id,
+            policy={
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"AWS": self.runtime_role.role_arn},
+                        "Action": [
+                            "s3files:ClientMount",
+                            "s3files:ClientWrite",
+                            "s3files:ClientRootAccess",
+                        ],
+                        "Condition": {
+                            "StringEquals": {
+                                "s3files:AccessPointArn": storage.access_point_arn,
+                            }
+                        },
+                    }
+                ],
+            },
         )
         self.runtime_role.add_to_policy(
             iam.PolicyStatement(

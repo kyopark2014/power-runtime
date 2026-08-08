@@ -10,6 +10,18 @@ output "access_point_arn" {
   value = aws_s3files_access_point.this.arn
 }
 
+output "app_data_file_system_id" {
+  value = aws_s3files_file_system.app_data.id
+}
+
+output "app_data_file_system_arn" {
+  value = aws_s3files_file_system.app_data.arn
+}
+
+output "app_data_access_point_arn" {
+  value = aws_s3files_access_point.app_data.arn
+}
+
 output "agent_runtime_vpc_subnets" {
   value = var.private_subnet_ids
 }

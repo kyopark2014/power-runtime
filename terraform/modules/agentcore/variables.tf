@@ -14,6 +14,10 @@ variable "agent_runtime_security_group_id" {
   type = string
 }
 
+variable "s3_files_file_system_id" {
+  type = string
+}
+
 variable "s3_files_file_system_arn" {
   type = string
 }

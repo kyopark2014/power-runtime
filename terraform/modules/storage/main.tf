@@ -53,6 +53,7 @@ resource "aws_iam_role_policy" "sync" {
 }
 
 resource "aws_s3files_file_system" "this" {
+  # Amazon S3 Files — Runtime session storage (agentcore-sessions/).
   bucket                = var.s3_bucket_arn
   role_arn              = aws_iam_role.sync.arn
   prefix                = var.s3_files_session_prefix
@@ -87,4 +88,42 @@ resource "aws_s3files_access_point" "this" {
   }
 
   depends_on = [aws_s3files_mount_target.this]
+}
+
+resource "aws_s3files_file_system" "app_data" {
+  # Amazon S3 Files — ECS app-data (tasks.db / graph / settings).
+  bucket                = var.s3_bucket_arn
+  role_arn              = aws_iam_role.sync.arn
+  prefix                = var.s3_files_app_data_prefix
+  accept_bucket_warning = true
+
+  depends_on = [aws_iam_role_policy.sync]
+}
+
+resource "aws_s3files_mount_target" "app_data" {
+  count = length(var.private_subnet_ids)
+
+  file_system_id  = aws_s3files_file_system.app_data.id
+  subnet_id       = var.private_subnet_ids[count.index]
+  security_groups = [var.s3files_mount_security_group_id]
+}
+
+resource "aws_s3files_access_point" "app_data" {
+  file_system_id = aws_s3files_file_system.app_data.id
+
+  posix_user {
+    uid = 0
+    gid = 0
+  }
+
+  root_directory {
+    path = "/"
+    creation_permissions {
+      owner_uid   = 0
+      owner_gid   = 0
+      permissions = "755"
+    }
+  }
+
+  depends_on = [aws_s3files_mount_target.app_data]
 }

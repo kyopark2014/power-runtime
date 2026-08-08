@@ -147,16 +147,53 @@ resource "aws_iam_role_policy" "runtime" {
         ]
       },
       {
-        Sid      = "ProjectS3Bucket"
+        Sid      = "ProjectS3BucketMeta"
         Effect   = "Allow"
-        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Action   = ["s3:GetBucketLocation"]
         Resource = [var.s3_bucket_arn]
       },
       {
-        Sid      = "ProjectS3Objects"
+        Sid      = "ProjectS3ListAllowedPrefixes"
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = ["${var.s3_bucket_arn}/*"]
+        Action   = ["s3:ListBucket"]
+        Resource = [var.s3_bucket_arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "artifacts",
+              "artifacts/*",
+              "images",
+              "images/*",
+              "docs",
+              "docs/*",
+            ]
+          }
+        }
+      },
+      {
+        Sid    = "ProjectS3Objects"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = [
+          "${var.s3_bucket_arn}/artifacts/*",
+          "${var.s3_bucket_arn}/images/*",
+          "${var.s3_bucket_arn}/docs/*",
+        ]
+      },
+      {
+        Sid    = "DenySensitiveS3Prefixes"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion",
+        ]
+        Resource = [
+          "${var.s3_bucket_arn}/app-data/*",
+          "${var.s3_bucket_arn}/agentcore-sessions/*",
+        ]
       },
       {
         Sid    = "SecretsManagerRead"
@@ -301,6 +338,30 @@ resource "null_resource" "docker_build" {
   }
 
   depends_on = [aws_ecr_repository.runtime]
+}
+
+# Session FS policy: Runtime only (ECS uses dedicated app-data FS).
+resource "aws_s3files_file_system_policy" "session" {
+  file_system_id = var.s3_files_file_system_id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = [aws_iam_role.runtime.arn]
+      }
+      Action = [
+        "s3files:ClientMount",
+        "s3files:ClientWrite",
+        "s3files:ClientRootAccess",
+      ]
+      Condition = {
+        StringEquals = {
+          "s3files:AccessPointArn" = var.s3_files_access_point_arn
+        }
+      }
+    }]
+  })
 }
 
 resource "aws_bedrockagentcore_agent_runtime" "this" {

@@ -53,6 +53,11 @@ variable "s3_files_session_prefix" {
   default = "agentcore-sessions/"
 }
 
+variable "s3_files_app_data_prefix" {
+  type    = string
+  default = "app-data/"
+}
+
 variable "session_storage_mount_path" {
   type    = string
   default = "/mnt/workspace"

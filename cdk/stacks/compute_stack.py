@@ -115,49 +115,49 @@ class ComputeStack(Stack):
                 resources=[data.bucket.arn_for_objects("*")],
             )
         )
+        # ECS mounts app-data FS only (not agentcore-sessions).
         self.task_role.add_to_policy(
             iam.PolicyStatement(
+                sid="S3FilesAppDataClientAccess",
                 actions=[
                     "s3files:ClientMount",
                     "s3files:ClientWrite",
                     "s3files:ClientRootAccess",
                 ],
-                resources=[storage.file_system_arn],
+                resources=[storage.app_data_file_system_arn],
                 conditions={
                     "ArnEquals": {
-                        "s3files:AccessPointArn": storage.access_point_arn,
+                        "s3files:AccessPointArn": storage.app_data_access_point_arn,
                     }
                 },
             )
         )
         self.task_role.add_to_policy(
             iam.PolicyStatement(
+                sid="S3FilesAppDataGetAccessPoint",
                 actions=["s3files:GetAccessPoint"],
-                resources=[storage.access_point_arn],
+                resources=[storage.app_data_access_point_arn],
             )
         )
         self.task_role.add_to_policy(
             iam.PolicyStatement(
+                sid="S3FilesAppDataListMountTargets",
                 actions=["s3files:ListMountTargets"],
-                resources=[storage.file_system_arn],
+                resources=[storage.app_data_file_system_arn],
             )
         )
 
+        # App-data FS policy: ECS only (Runtime uses session FS).
         s3files.CfnFileSystemPolicy(
             self,
-            "S3FilesFileSystemPolicy",
-            file_system_id=storage.file_system_id,
+            "S3FilesAppDataFileSystemPolicy",
+            file_system_id=storage.app_data_file_system_id,
             policy={
                 "Version": "2012-10-17",
                 "Statement": [
                     {
                         "Effect": "Allow",
-                        "Principal": {
-                            "AWS": [
-                                agent.runtime_role.role_arn,
-                                self.task_role.role_arn,
-                            ]
-                        },
+                        "Principal": {"AWS": self.task_role.role_arn},
                         "Action": [
                             "s3files:ClientMount",
                             "s3files:ClientWrite",
@@ -165,7 +165,7 @@ class ComputeStack(Stack):
                         ],
                         "Condition": {
                             "StringEquals": {
-                                "s3files:AccessPointArn": storage.access_point_arn,
+                                "s3files:AccessPointArn": storage.app_data_access_point_arn,
                             }
                         },
                     }
@@ -245,6 +245,9 @@ class ComputeStack(Stack):
             "sharing_url": f"https://{edge.distribution.distribution_domain_name}",
             "s3_files_file_system_id": storage.file_system_id,
             "s3_files_access_point_arn": storage.access_point_arn,
+            "s3_files_app_data_file_system_id": storage.app_data_file_system_id,
+            "s3_files_app_data_access_point_arn": storage.app_data_access_point_arn,
+            "s3_files_app_data_mount_path": APP_DATA_MOUNT_PATH,
             "agent_runtime_vpc_subnets": [
                 s.subnet_id for s in network.vpc.private_subnets
             ],
@@ -283,8 +286,8 @@ class ComputeStack(Stack):
                 {
                     "Name": "app-data",
                     "S3FilesVolumeConfiguration": {
-                        "FileSystemArn": storage.file_system_arn,
-                        "AccessPointArn": storage.access_point_arn,
+                        "FileSystemArn": storage.app_data_file_system_arn,
+                        "AccessPointArn": storage.app_data_access_point_arn,
                         "RootDirectory": "/",
                     },
                 }
@@ -303,7 +306,7 @@ class ComputeStack(Stack):
                 "CLOUDFRONT_KEY_PAIR_ID": secrets.cf_signing.get_att_string("PublicKeyId"),
                 "TASK_DB_MOUNT": APP_DATA_MOUNT_PATH,
                 "TASK_DB_PROJECT": PROJECT_NAME,
-                # Same S3 Files root as AgentCore /mnt/workspace (skills.list, skills/).
+                # graph/settings/tasks.db on app-data; skills via S3 API.
                 "SESSION_STORAGE_DIR": APP_DATA_MOUNT_PATH,
             },
             secrets={

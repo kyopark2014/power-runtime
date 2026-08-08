@@ -13,6 +13,7 @@ ALB_IDLE_TIMEOUT_SECONDS = 600
 CUSTOM_HEADER_NAME = "X-Custom-Header"
 APP_PORT = 8501
 S3_FILES_SESSION_PREFIX = "agentcore-sessions/"
+S3_FILES_APP_DATA_PREFIX = "app-data/"
 SESSION_STORAGE_MOUNT_PATH = "/mnt/workspace"
 APP_DATA_MOUNT_PATH = "/mnt/app-data"
 

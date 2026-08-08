@@ -90,6 +90,13 @@ def collect_config(
         "sharing_url": edge.get("SharingUrl", ""),
         "s3_files_file_system_id": storage.get("S3FilesFileSystemId", ""),
         "s3_files_access_point_arn": storage.get("S3FilesAccessPointArn", ""),
+        "s3_files_app_data_file_system_id": storage.get(
+            "S3FilesAppDataFileSystemId", ""
+        ),
+        "s3_files_app_data_access_point_arn": storage.get(
+            "S3FilesAppDataAccessPointArn", ""
+        ),
+        "s3_files_app_data_mount_path": "/mnt/app-data",
         "agent_runtime_vpc_subnets": private_subnets,
         "agent_runtime_security_groups": runtime_sgs,
         "agent_runtime_arn": agent.get("AgentRuntimeArn", ""),

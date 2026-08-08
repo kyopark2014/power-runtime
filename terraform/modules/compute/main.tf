@@ -114,6 +114,7 @@ resource "aws_iam_role_policy" "task" {
         Resource = ["${var.s3_bucket_arn}/*"]
       },
       {
+        Sid    = "S3FilesAppDataClientAccess"
         Effect = "Allow"
         Action = [
           "s3files:ClientMount",
@@ -128,11 +129,13 @@ resource "aws_iam_role_policy" "task" {
         }
       },
       {
+        Sid      = "S3FilesAppDataGetAccessPoint"
         Effect   = "Allow"
         Action   = ["s3files:GetAccessPoint"]
         Resource = [var.s3_files_access_point_arn]
       },
       {
+        Sid      = "S3FilesAppDataListMountTargets"
         Effect   = "Allow"
         Action   = ["s3files:ListMountTargets"]
         Resource = [var.s3_files_file_system_arn]
@@ -141,6 +144,7 @@ resource "aws_iam_role_policy" "task" {
   })
 }
 
+# App-data FS policy: ECS only (Runtime uses session FS).
 resource "aws_s3files_file_system_policy" "this" {
   file_system_id = var.s3_files_file_system_id
   policy = jsonencode({
@@ -148,10 +152,7 @@ resource "aws_s3files_file_system_policy" "this" {
     Statement = [{
       Effect = "Allow"
       Principal = {
-        AWS = [
-          var.agent_runtime_role_arn,
-          aws_iam_role.task.arn,
-        ]
+        AWS = [aws_iam_role.task.arn]
       }
       Action = [
         "s3files:ClientMount",
@@ -260,7 +261,7 @@ resource "aws_ecs_task_definition" "app" {
       { name = "CLOUDFRONT_KEY_PAIR_ID", value = var.cloudfront_public_key_id },
       { name = "TASK_DB_MOUNT", value = var.app_data_mount_path },
       { name = "TASK_DB_PROJECT", value = var.project_name },
-      # Same S3 Files root as AgentCore /mnt/workspace (skills.list, skills/).
+      # graph/settings/tasks.db on app-data; skills via S3 API.
       { name = "SESSION_STORAGE_DIR", value = var.app_data_mount_path },
     ]
     secrets = [

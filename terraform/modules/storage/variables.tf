@@ -18,6 +18,11 @@ variable "s3_files_session_prefix" {
   type = string
 }
 
+variable "s3_files_app_data_prefix" {
+  type    = string
+  default = "app-data/"
+}
+
 variable "agent_runtime_security_group_id" {
   type = string
 }
