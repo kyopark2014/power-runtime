@@ -49,6 +49,12 @@ def sanitize_user_path_segment(user_id: str | None) -> str | None:
     return segment or None
 
 
+def get_user_db_path(user_id: str | None) -> str:
+    """Durable per-user tasks/messages DB: {SESSION_STORAGE_DIR}/{user_id}/{user_id}.db."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, f"{segment}.db")
+
+
 def get_user_artifacts_dir(user_id: str | None) -> str:
     """Logical path for user artifacts (Runtime /mnt/workspace when present)."""
     segment = sanitize_user_path_segment(user_id) or "default"

@@ -299,6 +299,7 @@ def _build_final_payload(
 def _spawn_late_persist(
     *,
     task_id: str,
+    user_id: str,
     message_queue: queue.Queue,
     result_holder: dict[str, Any],
     tool_events: list[dict[str, Any]],
@@ -356,10 +357,11 @@ def _spawn_late_persist(
                 task_id,
                 "assistant",
                 final_content,
+                user_id=user_id,
                 images=images,
                 tool_events=events,
             )
-            flush_persist()
+            flush_persist(user_id)
         except Exception:
             logger.exception("Late persist failed")
 
@@ -426,7 +428,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
     chat.user_id = user_id
     chat.update(task["model_name"])
 
-    task_store.add_message(task_id, "user", prompt, images=files)
+    task_store.add_message(task_id, "user", prompt, user_id=user_id, images=files)
 
     message_queue: queue.Queue = queue.Queue()
     result_holder: dict[str, Any] = {"content": "", "images": []}
@@ -467,7 +469,9 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                         AGENT_STREAM_TIMEOUT_SECONDS,
                     )
                     error_text = "Agent timeout"
-                    task_store.add_message(task_id, "assistant", f"Error: {error_text}")
+                    task_store.add_message(
+                        task_id, "assistant", f"Error: {error_text}", user_id=user_id
+                    )
                     yield _sse_event({"type": "error", "data": error_text})
                     yield _sse_event(
                         {"type": "done", "content": f"Error: {error_text}", "images": []}
@@ -475,6 +479,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                     sse_closed_early = True
                     _spawn_late_persist(
                         task_id=task_id,
+                        user_id=user_id,
                         message_queue=message_queue,
                         result_holder=result_holder,
                         tool_events=tool_events,
@@ -505,7 +510,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
 
             if "error" in result_holder:
                 error_text = f"Error: {result_holder['error']}"
-                task_store.add_message(task_id, "assistant", error_text)
+                task_store.add_message(task_id, "assistant", error_text, user_id=user_id)
                 yield _sse_event({"type": "error", "data": result_holder["error"]})
                 yield _sse_event({"type": "done", "content": error_text, "images": []})
                 return
@@ -520,6 +525,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                 task_id,
                 "assistant",
                 final_content,
+                user_id=user_id,
                 images=images,
                 tool_events=events,
             )
@@ -542,6 +548,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                 )
                 _spawn_late_persist(
                     task_id=task_id,
+                    user_id=user_id,
                     message_queue=message_queue,
                     result_holder=result_holder,
                     tool_events=tool_events,
@@ -551,8 +558,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
             raise
         finally:
             if not sse_closed_early:
-                flush_persist()
-
+                flush_persist(user_id)
     from fastapi.responses import StreamingResponse
 
     return StreamingResponse(
