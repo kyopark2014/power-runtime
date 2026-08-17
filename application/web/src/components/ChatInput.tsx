@@ -17,6 +17,12 @@ interface AttachedImage {
   previewUrl: string;
 }
 
+interface LoadedFile {
+  path: string;
+  name: string;
+  size: number;
+}
+
 interface Props {
   disabled?: boolean;
   onSend: (text: string, files?: string[]) => void;
@@ -25,9 +31,18 @@ interface Props {
 
 const RAG_ACCEPT =
   ".pdf,.txt,.md,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js";
+const LOAD_ACCEPT =
+  ".pdf,.txt,.md,.markdown,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js,.ts,.tsx,.jsx,.yml,.yaml,.xml,.rst,.png,.jpg,.jpeg,.webp,.gif";
 const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif";
 const MIN_INPUT_HEIGHT = 24;
 const MAX_INPUT_HEIGHT = 160;
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function extensionFromMime(mime: string): string {
   if (mime === "image/jpeg") return ".jpg";
@@ -96,6 +111,7 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<AttachedImage[]>([]);
+  const [loadedFiles, setLoadedFiles] = useState<LoadedFile[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const attachmentsRef = useRef<AttachedImage[]>([]);
   const uploadingRef = useRef(false);
@@ -106,6 +122,7 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
   const inputWrapRef = useRef<HTMLFormElement>(null);
   const ragInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const loadInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   attachmentsRef.current = attachments;
@@ -184,7 +201,10 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
 
   function submit() {
     const text = value.trim();
-    const files = attachments.map((item) => item.url);
+    const files = [
+      ...attachments.map((item) => item.url),
+      ...loadedFiles.map((item) => item.path),
+    ];
     if ((!text && files.length === 0) || disabled || uploading) return;
     onSend(text, files);
     setValue("");
@@ -196,6 +216,7 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
       }
       return [];
     });
+    setLoadedFiles([]);
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -237,6 +258,33 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     if (files.length === 0 || disabled || uploadingRef.current) return;
     for (const file of files) {
       await uploadImageFile(normalizeImageFile(file, "uploaded_image"));
+    }
+  }
+
+  async function loadWorkspaceFiles(files: File[]) {
+    if (files.length === 0 || disabled || uploadingRef.current) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      for (const file of files) {
+        const result = await api.loadFile(file);
+        setLoadedFiles((prev) => {
+          const next = prev.filter((item) => item.path !== result.workspace_path);
+          return [
+            ...next,
+            {
+              path: result.workspace_path,
+              name: result.file_name,
+              size: file.size,
+            },
+          ];
+        });
+      }
+    } catch (err) {
+      console.error("Load file failed", err);
+      setUploadError("파일 로드에 실패했습니다. 다시 시도해 주세요.");
+    } finally {
+      setUploading(false);
     }
   }
 
@@ -299,10 +347,20 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     });
   }
 
+  function removeLoadedFile(path: string) {
+    setLoadedFiles((prev) => prev.filter((item) => item.path !== path));
+  }
+
   function openImageUpload() {
     setMenuOpen(false);
     setUploadError(null);
     imageInputRef.current?.click();
+  }
+
+  function openLoadFiles() {
+    setMenuOpen(false);
+    setUploadError(null);
+    loadInputRef.current?.click();
   }
 
   function openRagUpload() {
@@ -315,6 +373,13 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     const files = Array.from(e.target.files ?? []).filter(isImageFile);
     e.target.value = "";
     await uploadImageFiles(files);
+  }
+
+  async function onLoadFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    if (files.length === 0) return;
+    await loadWorkspaceFiles(files);
   }
 
   async function onRagFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
@@ -336,7 +401,9 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
   }
 
   const inputDisabled = disabled || uploading;
-  const canSend = !inputDisabled && (value.trim().length > 0 || attachments.length > 0);
+  const canSend =
+    !inputDisabled &&
+    (value.trim().length > 0 || attachments.length > 0 || loadedFiles.length > 0);
 
   const menu =
     menuOpen && menuPosition
@@ -384,6 +451,38 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
                 <span className="chat-add-menu-label">사진 첨부</span>
                 <span className="chat-add-menu-desc">
                   이미지를 첨부하거나 Ctrl/⌘+V로 붙여넣기
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="chat-add-menu-item"
+              role="menuitem"
+              onClick={openLoadFiles}
+            >
+              <span className="chat-add-menu-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 16 16">
+                  <path
+                    d="M3.5 6.5 8 2l4.5 4.5M8 2v8.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </span>
+              <span className="chat-add-menu-text">
+                <span className="chat-add-menu-label">Load files</span>
+                <span className="chat-add-menu-desc">
+                  파일을 workspace에 올리고 질문과 함께 전달
                 </span>
               </span>
             </button>
@@ -453,6 +552,16 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
           aria-hidden="true"
         />
         <input
+          ref={loadInputRef}
+          type="file"
+          className="chat-file-input"
+          accept={LOAD_ACCEPT}
+          multiple
+          onChange={onLoadFilesSelected}
+          tabIndex={-1}
+          aria-hidden="true"
+        />
+        <input
           ref={ragInputRef}
           type="file"
           className="chat-file-input"
@@ -461,6 +570,47 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
           tabIndex={-1}
           aria-hidden="true"
         />
+        {loadedFiles.length > 0 && (
+          <div className="chat-loaded-files" aria-label="로드된 파일">
+            {loadedFiles.map((item) => (
+              <div key={item.path} className="chat-loaded-file" title={item.path}>
+                <span className="chat-loaded-file-icon" aria-hidden="true">
+                  <svg width="14" height="14" viewBox="0 0 16 16">
+                    <path
+                      d="M4 2.5h5.5L12 5v8.5a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5Z"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.2"
+                    />
+                    <path
+                      d="M9.5 2.5V5H12"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.2"
+                    />
+                  </svg>
+                </span>
+                <span className="chat-loaded-file-meta">
+                  <span className="chat-loaded-file-name">{item.name}</span>
+                  {item.size > 0 && (
+                    <span className="chat-loaded-file-size">
+                      {formatFileSize(item.size)}
+                    </span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="chat-loaded-file-remove"
+                  aria-label={`${item.name} 제거`}
+                  onClick={() => removeLoadedFile(item.path)}
+                  disabled={inputDisabled}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="chat-attachments" aria-label="첨부 이미지">
             {attachments.map((item) => (

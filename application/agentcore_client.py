@@ -659,8 +659,9 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
 
     try:
         # Configure boto3 client with longer timeout for streaming responses
+        # (SSE gaps while agent runs tools / long LLM turns)
         boto_config = Config(
-            read_timeout=300,  # 5 minutes
+            read_timeout=1200,
             connect_timeout=60,
             retries={'max_attempts': 0}
         )
@@ -904,6 +905,17 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
         return result, image_url
         
     except Exception as e:
+        from botocore.exceptions import ReadTimeoutError
+
+        if isinstance(e, ReadTimeoutError):
+            logger.exception(
+                "AgentCore SSE read timed out after 1200s (idle gap between stream chunks)"
+            )
+            return (
+                "AgentCore 응답 스트림이 시간 초과되었습니다. "
+                "작업이 길면 잠시 후 다시 시도하거나, 질문을 나눠 보내 주세요.",
+                [],
+            )
         error_msg = f"Unexpected error: {str(e)}"
         logger.error(error_msg)
         return f"Error: {error_msg}", []

@@ -283,7 +283,11 @@ export default function App() {
     const taskId = activeTaskId;
     const displayPrompt =
       prompt.trim() ||
-      (files.length > 0 ? "첨부한 이미지를 분석해주세요." : "");
+      (files.length > 0
+        ? files.every((f) => f.startsWith("/mnt/workspace/"))
+          ? "첨부한 파일을 분석해주세요."
+          : "첨부한 이미지를 분석해주세요."
+        : "");
     uiLog("chat:handleSend", { taskId, prompt: displayPrompt, files });
     const optimistic: Message = {
       id: `pending-${randomUUID()}`,

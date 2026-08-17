@@ -30,6 +30,7 @@ AGENT_STREAM_MAX_SECONDS = 14400
 # worker to finish so the final answer can still be persisted for refresh.
 LATE_PERSIST_WAIT_SECONDS = 1800
 DEFAULT_IMAGE_PROMPT = "첨부한 이미지를 분석해주세요."
+DEFAULT_FILE_PROMPT = "첨부한 파일을 분석해주세요."
 
 _TOOL_INPUT_RE = re.compile(r"^Tool: (.+?), Input:\s*(.*)$", re.DOTALL)
 _TOOL_RESULT_RE = re.compile(r"^Tool Result: (.+)$", re.DOTALL)
@@ -426,10 +427,22 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
     files = [url.strip() for url in (body.files or []) if url and url.strip()]
     prompt = body.prompt.strip()
     if not prompt and files:
-        prompt = DEFAULT_IMAGE_PROMPT
+        has_workspace = any(f.startswith("/mnt/workspace/") for f in files)
+        has_image_url = any(not f.startswith("/mnt/workspace/") for f in files)
+        if has_workspace and not has_image_url:
+            prompt = DEFAULT_FILE_PROMPT
+        else:
+            prompt = DEFAULT_IMAGE_PROMPT
 
     chat.user_id = user_id
     chat.update(task["model_name"])
+
+    logger.info(
+        "chat stream files user=%s files=%s prompt_chars=%s",
+        user_id,
+        len(files),
+        len(prompt),
+    )
 
     task_store.add_message(task_id, "user", prompt, user_id=user_id, images=files)
 
