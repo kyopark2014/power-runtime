@@ -382,19 +382,36 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     await loadWorkspaceFiles(files);
   }
 
-  async function onRagFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    async function onRagFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (!file || disabled || uploading) return;
-
+    if (files.length === 0) return;
     setUploading(true);
     setUploadError(null);
     try {
-      const result = await api.uploadToRag(file);
-      onRagUploadComplete?.(result.message);
+      const names: string[] = [];
+      let lastMessage = "";
+      for (let i = 0; i < files.length; i += 1) {
+        const file = files[i];
+        const isLast = i === files.length - 1;
+        const result = await api.uploadToRag(file, { sync: isLast });
+        names.push(result.file_name || file.name);
+        lastMessage = result.message;
+      }
+      if (files.length === 1) {
+        onRagUploadComplete?.(lastMessage);
+      } else {
+        const listed = names.map((n) => `"${n}"`).join(", ");
+        onRagUploadComplete?.(
+          `${listed} ${names.length}개가 S3에 업로드 되었고 Knowledge Base와 동기화를 시작합니다.`,
+        );
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setUploadError(message);
+      console.error("Document upload failed", err);
+      const detail = err instanceof Error ? err.message : "";
+      setUploadError(
+        detail || "파일 업로드에 실패했습니다. 다시 시도해 주세요.",
+      );
     } finally {
       setUploading(false);
     }
@@ -511,7 +528,7 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
               <span className="chat-add-menu-text">
                 <span className="chat-add-menu-label">Upload to RAG</span>
                 <span className="chat-add-menu-desc">
-                  S3에 업로드하고 Knowledge Base 동기화
+                  S3로 직접 업로드하고 Knowledge Base 동기화
                 </span>
               </span>
             </button>
@@ -566,6 +583,7 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
           type="file"
           className="chat-file-input"
           accept={RAG_ACCEPT}
+          multiple
           onChange={onRagFileSelected}
           tabIndex={-1}
           aria-hidden="true"

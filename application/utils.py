@@ -406,6 +406,102 @@ def upload_to_s3(
         return None
 
 
+def rag_docs_s3_key(file_name: str, user_id: str | None = None) -> str:
+    """Build ``docs/{user}/{file}`` key used by Knowledge Base ingest."""
+    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    user_segment = _sanitize_s3_user_segment(user_id)
+    if user_segment:
+        return f"{s3_prefix}/{user_segment}/{safe_name}"
+    return f"{s3_prefix}/{safe_name}"
+
+
+def rag_docs_public_url(file_name: str, user_id: str | None = None) -> str | None:
+    """CloudFront/sharing URL for a docs/ object, if configured."""
+    if not sharing_url:
+        return None
+    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    user_segment = _sanitize_s3_user_segment(user_id)
+    if user_segment:
+        relative = f"{s3_prefix}/{parse.quote(user_segment)}/{parse.quote(safe_name)}"
+    else:
+        relative = f"{s3_prefix}/{parse.quote(safe_name)}"
+    return f"{sharing_url.rstrip('/')}/{relative}"
+
+
+def generate_rag_upload_presigned_put(
+    file_name: str,
+    user_id: str | None = None,
+    *,
+    expires_in: int = 900,
+) -> dict | None:
+    """Return a browser-usable presigned PUT URL for RAG docs uploads.
+
+    Only ``Content-Type`` is signed (same as Load-files) so browser PUT
+    matches CORS/signature.
+    """
+    if not s3_bucket:
+        logger.error("s3_bucket is not configured")
+        return None
+
+    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    s3_key = rag_docs_s3_key(safe_name, user_id=user_id)
+    content_type = _session_upload_content_type(safe_name)
+    headers = {"Content-Type": content_type}
+    params: dict = {
+        "Bucket": s3_bucket,
+        "Key": s3_key,
+        "ContentType": content_type,
+    }
+
+    try:
+        s3_client = _s3_client_for_presign()
+        upload_url = s3_client.generate_presigned_url(
+            ClientMethod="put_object",
+            Params=params,
+            ExpiresIn=max(60, int(expires_in)),
+            HttpMethod="PUT",
+        )
+        logger.info(
+            "rag upload presign key=%s host=%s",
+            s3_key,
+            parse.urlparse(upload_url).netloc,
+        )
+        return {
+            "file_name": safe_name,
+            "s3_key": s3_key,
+            "content_type": content_type,
+            "upload_url": upload_url,
+            "headers": headers,
+            "expires_in": max(60, int(expires_in)),
+            "url": rag_docs_public_url(safe_name, user_id=user_id),
+        }
+    except Exception:
+        logger.error(
+            "Error generating rag upload presign: %s", traceback.format_exc()
+        )
+        return None
+
+
+def _s3_client_for_presign():
+    """S3 client for browser-safe regional, virtual-hosted presigned URLs.
+
+    Global ``*.s3.amazonaws.com`` hosts often 307-redirect to the region
+    endpoint; browsers then fail the signed PUT (403/CORS). Prefer virtual-hosted
+    ``https://{bucket}.s3.{region}.amazonaws.com/...``.
+    """
+    from botocore.config import Config
+
+    region = bedrock_region or "us-west-2"
+    return boto3.client(
+        service_name="s3",
+        region_name=region,
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
+    )
+
+
 def session_upload_s3_key(file_name: str, user_id: str | None = None) -> str:
     """Build ``agentcore-sessions/{user}/upload/{file}`` object key."""
     segment = _sanitize_s3_user_segment(user_id) or "default"
