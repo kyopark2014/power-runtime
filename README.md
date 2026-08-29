@@ -1801,7 +1801,7 @@ Python 3.12 가상환경을 만들고 boto3를 설치한 뒤, [installer.py](./i
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install boto3
+pip install boto3 cryptography
 
 python installer.py
 ```
