@@ -1,4 +1,4 @@
-"""CloudWatch custom metrics and dashboard helpers for Power AgentCore runtime."""
+"""CloudWatch custom metrics and dashboard helpers for LangGraph AgentCore runtime."""
 
 from __future__ import annotations
 
@@ -114,8 +114,8 @@ def _agent_runtime_name(project_name: str) -> str:
 
 
 def _load_runtime_context() -> dict[str, str]:
-    project_name = "power-runtime"
-    runtime_name = _agent_runtime_name("power-runtime")
+    project_name = "langgraph-runtime"
+    runtime_name = _agent_runtime_name("agentic-work")
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
 
     try:
@@ -185,8 +185,12 @@ def extract_token_usage(message: Any) -> dict[str, int]:
         )
         details = usage_metadata.get("input_token_details")
         if isinstance(details, dict):
-            usage["cache_read"] = int(details.get("cache_read") or 0)
-            usage["cache_creation"] = int(details.get("cache_creation") or 0)
+            usage["cache_read"] = int(
+                details.get("cache_read") or details.get("cached_tokens") or 0
+            )
+            usage["cache_creation"] = int(
+                details.get("cache_creation") or details.get("cache_write_tokens") or 0
+            )
 
     response_metadata = getattr(message, "response_metadata", None)
     if isinstance(response_metadata, dict):
@@ -448,7 +452,6 @@ def _custom_model_metric_query(
     ]
 
 
-
 def _tokens_by_model_pie_metrics(
     project_name: str,
     period: int = 86400,
@@ -490,7 +493,7 @@ def _custom_project_metric(
     aggregate: bool = True,
     **options: Any,
 ) -> list[Any]:
-    """Custom Power/LangGraph metric query.
+    """Custom LangGraph metric query.
 
     Metrics are published with ProjectName, AgentRuntimeName, and ModelId.
     CloudWatch requires SEARCH (or full dimension match), not ProjectName alone.
@@ -870,7 +873,7 @@ def build_dashboard_body(
                 f"# 🚀 {dash_name}\n"
                 f"**Region** `{region}` · **Runtime** `{runtime_id}` · "
                 f"**φ-layout** `{_DASHBOARD_PHI_WIDE}:{_DASHBOARD_PHI_NARROW}`\n\n"
-                "Power AgentCore 런타임 **토큰 · 비용 · 성능** 통합 모니터링. "
+                "LangGraph AgentCore 런타임 **토큰 · 비용 · 성능** 통합 모니터링. "
                 "모델 비용은 커스텀 메트릭, CPU/메모리 비용은 AgentCore vended 메트릭 기반 **추정치**입니다."
             ),
         )
