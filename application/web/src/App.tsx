@@ -20,6 +20,15 @@ function sortTasks(tasks: Task[]): Task[] {
   });
 }
 
+/** Most recently updated task, ignoring pin order (for entry / delete fallback). */
+function mostRecentlyUpdatedTask(tasks: Task[]): Task | null {
+  if (tasks.length === 0) return null;
+  return [...tasks].sort(
+    (a, b) =>
+      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+  )[0];
+}
+
 function titleFromPrompt(prompt: string): string {
   return prompt.trim().slice(0, 50) || "New task";
 }
@@ -137,8 +146,9 @@ export default function App() {
         setActiveTaskId(task.id);
         setMessages([]);
       } else {
-        setActiveTaskId(rows[0].id);
-        await loadMessages(rows[0].id);
+        const latest = mostRecentlyUpdatedTask(rows)!;
+        setActiveTaskId(latest.id);
+        await loadMessages(latest.id);
       }
       if (!cancelled) {
         tasksBootstrappedForUserRef.current = userId;
@@ -244,8 +254,9 @@ export default function App() {
     const rows = await refreshTasks();
     if (activeTaskId !== taskId) return;
     if (rows.length > 0) {
-      setActiveTaskId(rows[0].id);
-      await loadMessages(rows[0].id);
+      const latest = mostRecentlyUpdatedTask(rows)!;
+      setActiveTaskId(latest.id);
+      await loadMessages(latest.id);
       return;
     }
     if (!config) return;
