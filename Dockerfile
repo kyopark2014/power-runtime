@@ -24,7 +24,8 @@ RUN pip install \
     langchain-openai \
     "openai>=2.41.0" \
     aws-bedrock-token-generator \
-    requests
+    requests \
+    "markdown>=3.7"
 
 COPY . .
 COPY --from=frontend /web/dist /app/application/web/dist
