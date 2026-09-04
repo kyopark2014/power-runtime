@@ -1,6 +1,6 @@
 bedrock-agentcore
 bedrock-agentcore-starter-toolkit
-fastapi
+fastapi>=0.134.0
 python-multipart
 uvicorn[standard]
 pandas
@@ -10,7 +10,7 @@ langchain_aws
 langchain-openai
 openai>=2.41.0
 aws-bedrock-token-generator
-langchain
+langchain[mcp]>=1.4.0
 langchain_community
 langgraph
 langchain_experimental
@@ -25,8 +25,7 @@ plotly_express==0.4.1
 matplotlib==3.10.0
 PyPDF2==3.0.1
 opensearch-py
-mcp
-langchain-mcp-adapters==0.1.9
+mcp>=2.1.1
 wikipedia
 aioboto3
 requests
@@ -38,6 +37,7 @@ sarif-om==1.0.4
 arxiv==2.2.0
 chembl-webresource-client==0.10.9
 pytrials==1.0.0
+# strands-agents: for MCP 2.x _compat, prefer git main if pip pin lacks it
 strands-agents
 strands-agents-tools
 reportlab
@@ -47,3 +47,4 @@ cryptography
 pypdf
 pdfplumber
 python-docx
+httpx2
