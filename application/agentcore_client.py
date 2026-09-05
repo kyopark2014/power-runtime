@@ -23,6 +23,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agentcore_client")
 
+# Cap tool payloads for logs / UI notifications.
+_LOG_TRUNCATE_CHARS = 2_000
+_NOTIFY_TRUNCATE_CHARS = 8_000
+
+
+def _truncate_text(text: object, max_chars: int) -> str:
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        try:
+            text = json.dumps(text, ensure_ascii=False, default=str)
+        except TypeError:
+            text = str(text)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    suffix = f"\n...[truncated {omitted} chars]"
+    keep = max(0, max_chars - len(suffix))
+    return text[:keep] + suffix
+
 config = utils.load_config()
 
 bedrock_region = config['region']
@@ -456,19 +476,32 @@ def get_tool_info(tool_name, tool_content):
             else:
                 json_data = tool_content
             
+            # AWS docs MCP may return {"search_results": [...]} as the root object
+            if isinstance(json_data, dict) and "search_results" in json_data:
+                json_data = json_data["search_results"]
+
             # Ensure json_data is iterable
             if not isinstance(json_data, list):
                 json_data = [json_data]
-            
+
+            normalized = []
             for item in json_data:
-                logger.info(f"item: {item}")
-                
                 if isinstance(item, str):
                     try:
                         item = json.loads(item)
                     except json.JSONDecodeError:
                         logger.info(f"Failed to parse item as JSON: {item}")
                         continue
+
+                if isinstance(item, dict) and "search_results" in item and "url" not in item:
+                    nested = item.get("search_results")
+                    if isinstance(nested, list):
+                        normalized.extend(nested)
+                    continue
+                normalized.append(item)
+
+            for item in normalized:
+                logger.info(f"item: {item}")
                 
                 if isinstance(item, dict) and 'url' in item and 'title' in item:
                     url = item['url']
@@ -700,13 +733,13 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                             if agent_type == 'strands':
                                 if 'data' in data_json:
                                     text = normalize_bedrock_message_content(data_json['data'])
-                                    logger.info(f"[data] {text}")
+                                    logger.info(f"[data] {_truncate_text(text, _LOG_TRUNCATE_CHARS)}")
                                     current += text
                                     update_streaming_result(notification_queue, current)
 
                                 elif 'result' in data_json:
                                     final_output = data_json['result']
-                                    logger.info(f"[result] {final_output}")
+                                    logger.info(f"[result] {_truncate_text(final_output, _LOG_TRUNCATE_CHARS)}")
 
                                     result = final_output.get('messages', [])
                                     logger.info(f"result: {result}")
@@ -721,7 +754,7 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                                     if data_json.get('tool'):
                                         tool_name_list[toolUseId] = data_json['tool']
                                     tool_name = tool_name_list.get(toolUseId, data_json.get('tool', 'unknown'))
-                                    logger.info(f"[tool_result] {toolResult}")
+                                    logger.info(f"[tool_result] {_truncate_text(toolResult, _LOG_TRUNCATE_CHARS)}")
 
                                     effective_input = tool_input_cache.get(toolUseId, {})
                                     current = on_tool_use_started(
@@ -730,10 +763,10 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                                     tool_slot_update(
                                         notification_queue,
                                         f"{toolUseId}:input",
-                                        f"Tool: {tool_name}, Input: {_format_tool_input(effective_input)}",
+                                        f"Tool: {tool_name}, Input: {_truncate_text(_format_tool_input(effective_input), _NOTIFY_TRUNCATE_CHARS)}",
                                     )
 
-                                    tool_slot_update(notification_queue, f"{toolUseId}:result", f"Tool Result: {str(toolResult)}")
+                                    tool_slot_update(notification_queue, f"{toolUseId}:result", f"Tool Result: {_truncate_text(toolResult, _NOTIFY_TRUNCATE_CHARS)}")
 
                                     content, urls, refs = get_tool_info(tool_name, toolResult)
                                     if refs:
@@ -766,18 +799,18 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                                         tool_slot_update(
                                             notification_queue,
                                             f"{toolUseId}:input",
-                                            f"Tool: {tool}, Input: {_format_tool_input(effective_input)}",
+                                            f"Tool: {tool}, Input: {_truncate_text(_format_tool_input(effective_input), _NOTIFY_TRUNCATE_CHARS)}",
                                         )
                                     
                             elif agent_type == 'langgraph': # langgraph
                                 if 'data' in data_json:
                                     text = normalize_bedrock_message_content(data_json['data'])
-                                    logger.info(f"[data] {text}")
+                                    logger.info(f"[data] {_truncate_text(text, _LOG_TRUNCATE_CHARS)}")
                                     current += text
                                     update_streaming_result(notification_queue, current)
                                 elif 'result' in data_json:
                                     final_output = data_json['result']
-                                    logger.info(f"[result] {final_output}")
+                                    logger.info(f"[result] {_truncate_text(final_output, _LOG_TRUNCATE_CHARS)}")
 
                                     messages = final_output.get('messages', [])
                                     raw_content = messages[-1].get('content') if messages else ""
@@ -794,7 +827,7 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                                     if data_json.get('tool'):
                                         tool_name_list[toolUseId] = data_json['tool']
                                     tool_name = tool_name_list.get(toolUseId, data_json.get('tool', 'unknown'))
-                                    logger.info(f"[tool_result] {toolResult}")
+                                    logger.info(f"[tool_result] {_truncate_text(toolResult, _LOG_TRUNCATE_CHARS)}")
 
                                     logger.info(f"tool result: {toolUseId}")
                                     effective_input = tool_input_cache.get(toolUseId, {})
@@ -804,10 +837,10 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                                     tool_slot_update(
                                         notification_queue,
                                         f"{toolUseId}:input",
-                                        f"Tool: {tool_name}, Input: {_format_tool_input(effective_input)}",
+                                        f"Tool: {tool_name}, Input: {_truncate_text(_format_tool_input(effective_input), _NOTIFY_TRUNCATE_CHARS)}",
                                     )
 
-                                    tool_slot_update(notification_queue, f"{toolUseId}:result", f"Tool Result: {str(toolResult)}")
+                                    tool_slot_update(notification_queue, f"{toolUseId}:result", f"Tool Result: {_truncate_text(toolResult, _NOTIFY_TRUNCATE_CHARS)}")
 
                                     content, urls, refs = get_tool_info(tool_name, toolResult)
                                     if refs:
@@ -842,7 +875,7 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                                         tool_slot_update(
                                             notification_queue,
                                             f"{toolUseId}:input",
-                                            f"Tool: {tool}, Input: {_format_tool_input(effective_input)}",
+                                            f"Tool: {tool}, Input: {_truncate_text(_format_tool_input(effective_input), _NOTIFY_TRUNCATE_CHARS)}",
                                         )
                                     
                             else: # claude
@@ -869,7 +902,7 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
                                     logger.info(f"ToolResult: {ToolResultBlock}")
 
                                     logger.info(f"tool result: {ToolResultBlock}")                                    
-                                    add_notification(notification_queue, f"Tool Result: {str(ToolResultBlock)}")
+                                    add_notification(notification_queue, f"Tool Result: {_truncate_text(ToolResultBlock, _NOTIFY_TRUNCATE_CHARS)}")
 
                                     content, urls, refs = get_tool_info(tool_name, ToolResultBlock)
                                     if refs:

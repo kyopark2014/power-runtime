@@ -510,7 +510,11 @@ async def agent_langgraph(payload):
                             yield payload
 
             elif isinstance(chunk, ToolMessage):
-                logger.info(f"ToolMessage: {chunk.name}, {chunk.content}")
+                tool_result_text = chunk.content
+                logger.info(
+                    f"ToolMessage: {chunk.name}, "
+                    f"{utils.truncate_for_log(tool_result_text)}"
+                )
                 tool_used = True
                 tool_use_id = chunk.tool_call_id or ""
                 tool_name = chunk.name or tool_name_by_id.get(tool_use_id, "")
@@ -522,7 +526,7 @@ async def agent_langgraph(payload):
                     if payload:
                         yield payload
                 yield {
-                    "toolResult": chunk.content,
+                    "toolResult": utils.truncate_for_stream(tool_result_text),
                     "toolUseId": tool_use_id,
                     "tool": tool_name,
                 }
