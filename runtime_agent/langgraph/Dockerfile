@@ -20,7 +20,7 @@ RUN pip install "mcp>=2.1.1" httpx2 awslabs.aws-documentation-mcp-server
 RUN pip install bedrock-agentcore uv
 RUN pip install Pillow pytz tavily-python langchain-text-splitters
 RUN pip install requests beautifulsoup4
-RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml defusedxml lxml
+RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pymupdf pyyaml defusedxml lxml
 RUN pip install colorama rich
 
 # Skills that use docx-js / pptxgenjs / sharp via bash/node (local install for require())
