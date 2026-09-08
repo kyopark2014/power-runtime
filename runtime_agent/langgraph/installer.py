@@ -410,8 +410,95 @@ def _project_secret_resource_arns(config) -> list:
     return secret_arns
 
 
+
+def _compact_policy_json(policy_document: dict) -> str:
+    """Serialize IAM policy JSON without whitespace (PolicySize quota is 6144)."""
+    return json.dumps(policy_document, separators=(",", ":"))
+
+
+def _upsert_managed_policy(
+    account_id: str,
+    policy_name: str,
+    policy_document: dict,
+    description: str,
+) -> str | None:
+    """Create or update a customer managed policy with compact JSON."""
+    compact = _compact_policy_json(policy_document)
+    size = len(compact.encode("utf-8"))
+    if size > 6144:
+        print(
+            f"Policy document too large for {policy_name}: {size} bytes "
+            f"(quota 6144). Split or trim statements before retrying."
+        )
+        return None
+
+    try:
+        iam_client = boto3.client("iam")
+        policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
+        try:
+            existing = iam_client.get_policy(PolicyArn=policy_arn)
+            print(f"Existing policy found: {existing['Policy']['Arn']}")
+            versions = iam_client.list_policy_versions(PolicyArn=policy_arn)["Versions"]
+            if len(versions) >= 5:
+                print(f"Policy has {len(versions)} versions, cleaning up old versions...")
+                non_default = [v for v in versions if not v["IsDefaultVersion"]]
+                if non_default:
+                    oldest = non_default[0]
+                    iam_client.delete_policy_version(
+                        PolicyArn=policy_arn,
+                        VersionId=oldest["VersionId"],
+                    )
+                    print(f"✓ Deleted old policy version: {oldest['VersionId']}")
+                else:
+                    for version in versions[1:]:
+                        try:
+                            iam_client.set_default_policy_version(
+                                PolicyArn=policy_arn,
+                                VersionId=version["VersionId"],
+                            )
+                            iam_client.delete_policy_version(
+                                PolicyArn=policy_arn,
+                                VersionId=versions[0]["VersionId"],
+                            )
+                            print(
+                                f"✓ Switched default version and deleted old "
+                                f"version: {versions[0]['VersionId']}"
+                            )
+                            break
+                        except Exception as e:
+                            print(f"Failed to switch version {version['VersionId']}: {e}")
+                            continue
+
+            response = iam_client.create_policy_version(
+                PolicyArn=policy_arn,
+                PolicyDocument=compact,
+                SetAsDefault=True,
+            )
+            print(
+                f"✓ Policy update completed: "
+                f"{response['PolicyVersion']['VersionId']} ({size} bytes)"
+            )
+            return existing["Policy"]["Arn"]
+        except iam_client.exceptions.NoSuchEntityException:
+            response = iam_client.create_policy(
+                PolicyName=policy_name,
+                PolicyDocument=compact,
+                Description=description,
+            )
+            print(f"✓ New policy created: {response['Policy']['Arn']} ({size} bytes)")
+            return response["Policy"]["Arn"]
+    except Exception as e:
+        print(f"Policy creation failed: {e}")
+        return None
+
+
 def create_bedrock_agentcore_policy(config):
-    """Create IAM policy for Bedrock AgentCore access"""
+    """Create IAM policy for Bedrock AgentCore access.
+
+    S3 / S3 Files / deny-sensitive statements live in
+    ``create_bedrock_agentcore_storage_policy`` so each document stays under
+    the 6144-byte managed PolicySize quota.
+    """
     region = config['region']
     accountId = config['accountId']
     projectName = config.get('projectName', 'agentcore')
@@ -420,12 +507,11 @@ def create_bedrock_agentcore_policy(config):
         config.get("agentcore_gateway_region", "us-east-1"),
     )
     runtime_resource_arns = _project_agent_runtime_resource_arns(config)
-    bucket_arns, object_arns, list_prefixes, deny_object_arns = _project_s3_resource_arns(config)
     secret_arns = _project_secret_resource_arns(config)
-    
+
     policy_name = f"AmazonBedrockAgentCoreRuntimePolicyFor{projectName}"
     policy_description = f"Policy for accessing Bedrock AgentCore Runtime endpoints"
-    
+
     policy_document = {
         "Version": "2012-10-17",
         "Statement": [
@@ -469,7 +555,6 @@ def create_bedrock_agentcore_policy(config):
                 ],
                 "Resource": ["*"],
             },
-
             {
                 # ListAgentRuntimes is account-scoped; IAM requires Resource "*".
                 "Sid": "ListAgentRuntimes",
@@ -632,52 +717,6 @@ def create_bedrock_agentcore_policy(config):
                 "Resource": "*"
             },
             {
-                "Sid": "ProjectS3BucketMeta",
-                "Effect": "Allow",
-                "Action": [
-                    "s3:GetBucketLocation",
-                ],
-                "Resource": bucket_arns,
-            },
-            {
-                # List only CF-shared prefixes used by Runtime tools.
-                "Sid": "ProjectS3ListAllowedPrefixes",
-                "Effect": "Allow",
-                "Action": [
-                    "s3:ListBucket",
-                ],
-                "Resource": bucket_arns,
-                "Condition": {
-                    "StringLike": {
-                        "s3:prefix": list_prefixes,
-                    }
-                },
-            },
-            {
-                "Sid": "ProjectS3Objects",
-                "Effect": "Allow",
-                "Action": [
-                    "s3:GetObject",
-                    "s3:PutObject",
-                    "s3:DeleteObject",
-                ],
-                "Resource": object_arns,
-            },
-            {
-                # Block S3 API access to app-data (tasks.db, virtual keys) and
-                # session store. Checkpoints still work via s3files: ClientMount.
-                "Sid": "DenySensitiveS3Prefixes",
-                "Effect": "Deny",
-                "Action": [
-                    "s3:GetObject",
-                    "s3:GetObjectVersion",
-                    "s3:PutObject",
-                    "s3:DeleteObject",
-                    "s3:DeleteObjectVersion",
-                ],
-                "Resource": deny_object_arns,
-            },
-            {
                 "Sid": "VpcNetworkInterface",
                 "Effect": "Allow",
                 "Action": [
@@ -696,14 +735,76 @@ def create_bedrock_agentcore_policy(config):
         ]
     }
 
+    return _upsert_managed_policy(
+        accountId, policy_name, policy_document, policy_description
+    )
+
+
+def create_bedrock_agentcore_storage_policy(config):
+    """S3 / S3 Files / deny-sensitive statements (split for PolicySize quota)."""
+    region = config["region"]
+    account_id = config["accountId"]
+    project_name = config.get("projectName", "agentcore")
+    bucket_arns, object_arns, list_prefixes, deny_object_arns = (
+        _project_s3_resource_arns(config)
+    )
+
+    statements = [
+        {
+            "Sid": "ProjectS3BucketMeta",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetBucketLocation",
+            ],
+            "Resource": bucket_arns,
+        },
+        {
+            # List only CF-shared prefixes used by Runtime tools.
+            "Sid": "ProjectS3ListAllowedPrefixes",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+            ],
+            "Resource": bucket_arns,
+            "Condition": {
+                "StringLike": {
+                    "s3:prefix": list_prefixes,
+                }
+            },
+        },
+        {
+            "Sid": "ProjectS3Objects",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+            ],
+            "Resource": object_arns,
+        },
+        {
+            # Block S3 API access to app-data (tasks.db, virtual keys) and
+            # session store. Checkpoints still work via s3files: ClientMount.
+            "Sid": "DenySensitiveS3Prefixes",
+            "Effect": "Deny",
+            "Action": [
+                "s3:GetObject",
+                "s3:GetObjectVersion",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion",
+            ],
+            "Resource": deny_object_arns,
+        },
+    ]
 
     file_system_id = config.get("s3_files_file_system_id")
     access_point_arn = config.get("s3_files_access_point_arn")
     if file_system_id and access_point_arn:
         file_system_arn = (
-            f"arn:aws:s3files:{region}:{accountId}:file-system/{file_system_id}"
+            f"arn:aws:s3files:{region}:{account_id}:file-system/{file_system_id}"
         )
-        policy_document["Statement"].extend(
+        statements.extend(
             [
                 {
                     "Sid": "S3FilesClientAccess",
@@ -738,75 +839,18 @@ def create_bedrock_agentcore_policy(config):
                 },
             ]
         )
-    
-    try:
-        iam_client = boto3.client('iam')
-        
-        # Check if policy already exists
-        try:
-            existing_policy = iam_client.get_policy(PolicyArn=f"arn:aws:iam::{accountId}:policy/{policy_name}")
-            print(f"Existing policy found: {existing_policy['Policy']['Arn']}")
-            
-            # List all policy versions
-            versions_response = iam_client.list_policy_versions(PolicyArn=existing_policy['Policy']['Arn'])
-            versions = versions_response['Versions']
-            
-            # If we have 5 versions, delete the oldest non-default version
-            if len(versions) >= 5:
-                print(f"Policy has {len(versions)} versions, cleaning up old versions...")
-                
-                # Find non-default versions to delete
-                non_default_versions = [v for v in versions if not v['IsDefaultVersion']]
-                
-                if non_default_versions:
-                    # Delete the oldest non-default version
-                    oldest_version = non_default_versions[0]
-                    iam_client.delete_policy_version(
-                        PolicyArn=existing_policy['Policy']['Arn'],
-                        VersionId=oldest_version['VersionId']
-                    )
-                    print(f"✓ Deleted old policy version: {oldest_version['VersionId']}")
-                else:
-                    # If all versions are default, we need to set a different version as default first
-                    for version in versions[1:]:  # Skip the current default
-                        try:
-                            iam_client.set_default_policy_version(
-                                PolicyArn=existing_policy['Policy']['Arn'],
-                                VersionId=version['VersionId']
-                            )
-                            # Now delete the old default
-                            iam_client.delete_policy_version(
-                                PolicyArn=existing_policy['Policy']['Arn'],
-                                VersionId=versions[0]['VersionId']
-                            )
-                            print(f"✓ Switched default version and deleted old version: {versions[0]['VersionId']}")
-                            break
-                        except Exception as e:
-                            print(f"Failed to switch version {version['VersionId']}: {e}")
-                            continue
-            
-            # Create policy version (compact JSON to stay under 6144 PolicySize quota)
-            response = iam_client.create_policy_version(
-                PolicyArn=existing_policy['Policy']['Arn'],
-                PolicyDocument=json.dumps(policy_document, separators=(",", ":")),
-                SetAsDefault=True
-            )
-            print(f"✓ Policy update completed: {response['PolicyVersion']['VersionId']}")
-            return existing_policy['Policy']['Arn']
-            
-        except iam_client.exceptions.NoSuchEntityException:
-            # Create new policy
-            response = iam_client.create_policy(
-                PolicyName=policy_name,
-                PolicyDocument=json.dumps(policy_document, separators=(",", ":")),
-                Description=policy_description
-            )
-            print(f"✓ New policy created: {response['Policy']['Arn']}")
-            return response['Policy']['Arn']
-            
-    except Exception as e:
-        print(f"Policy creation failed: {e}")
-        return None
+
+    policy_name = f"AmazonBedrockAgentCoreRuntimeStorageFor{project_name}"
+    policy_description = (
+        f"S3 and S3 Files access for Bedrock AgentCore Runtime ({project_name})"
+    )
+    policy_document = {
+        "Version": "2012-10-17",
+        "Statement": statements,
+    }
+    return _upsert_managed_policy(
+        account_id, policy_name, policy_document, policy_description
+    )
 
 
 def create_aws_tavily_invoke_policy(config):
@@ -956,6 +1000,11 @@ def create_bedrock_agentcore_role(config):
         print("Role creation aborted due to policy creation failure")
         return None
 
+    storage_policy_arn = create_bedrock_agentcore_storage_policy(config)
+    if not storage_policy_arn:
+        print("Role creation aborted due to storage policy creation failure")
+        return None
+
     tavily_policy_arn = create_aws_tavily_invoke_policy(config)
     if not tavily_policy_arn:
         print("Role creation aborted due to aws-tavily invoke policy failure")
@@ -977,8 +1026,9 @@ def create_bedrock_agentcore_role(config):
             )
             print("✓ Trust policy updated successfully")
             
-            # Attach policies
+            # Attach policies (core + storage split for PolicySize quota + tavily)
             attach_policy_to_role(role_name, policy_arn)
+            attach_policy_to_role(role_name, storage_policy_arn)
             attach_policy_to_role(role_name, tavily_policy_arn)
             
             return existing_role['Role']['Arn']
@@ -994,8 +1044,8 @@ def create_bedrock_agentcore_role(config):
             )
             print(f"✓ New role created: {response['Role']['Arn']}")
             
-            # Attach policies
             attach_policy_to_role(role_name, policy_arn)
+            attach_policy_to_role(role_name, storage_policy_arn)
             attach_policy_to_role(role_name, tavily_policy_arn)
             
             return response['Role']['Arn']
@@ -1013,12 +1063,8 @@ def create_iam_policies():
     try:
         config = load_config()
         
-        # Create Bedrock AgentCore policy
-        print("\n1. Creating Bedrock AgentCore policy...")
-        policy_arn = create_bedrock_agentcore_policy(config)
-        
-        # Create Bedrock AgentCore role
-        print("\n2. Creating Bedrock AgentCore role...")
+        # Role step creates/updates core + storage + tavily policies and attaches them.
+        print("\n1. Creating Bedrock AgentCore role and policies...")
         role_arn = create_bedrock_agentcore_role(config)
         
         if not role_arn:
@@ -1026,7 +1072,7 @@ def create_iam_policies():
             return False
         
         # Update AgentCore configuration
-        print("\n3. Updating AgentCore configuration...")
+        print("\n2. Updating AgentCore configuration...")
         update_config('agent_runtime_role', role_arn)
         print(f"✓ AgentCore configuration updated: {role_arn}")
         
