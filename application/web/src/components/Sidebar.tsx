@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { formatBrandTitle } from "../formatBrandTitle";
 import { useTheme } from "../hooks/useTheme";
 import type { Theme } from "../theme";
@@ -46,6 +46,9 @@ interface Props {
   onPatchTask: (taskId: string, patch: Partial<Task>) => void | Promise<void>;
   onDeleteTask: (taskId: string) => void;
   onLogout: () => void;
+  sidebarResizing?: boolean;
+  onSidebarResizeStart?: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onSidebarResizeReset?: () => void;
 }
 
 export function Sidebar({
@@ -63,6 +66,9 @@ export function Sidebar({
   onPatchTask,
   onDeleteTask,
   onLogout,
+  sidebarResizing = false,
+  onSidebarResizeStart,
+  onSidebarResizeReset,
 }: Props) {
   const skillBtnRef = useRef<HTMLButtonElement>(null);
   const mcpBtnRef = useRef<HTMLButtonElement>(null);
@@ -300,6 +306,18 @@ export function Sidebar({
             </div>
           )}
         </div>
+
+        {onSidebarResizeStart && (
+          <div
+            className={`sidebar-resizer${sidebarResizing ? " is-active" : ""}`}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize task panel"
+            title="Drag to resize · double-click to reset"
+            onPointerDown={onSidebarResizeStart}
+            onDoubleClick={onSidebarResizeReset}
+          />
+        )}
       </aside>
 
       {drawer === "skill" && config?.skills && activeTask && (
