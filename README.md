@@ -152,7 +152,7 @@ Endpoint 는 private subnet 에 배치되며, ECS security group 과 Agent Runti
 | 트래픽 | 이유 |
 |--------|------|
 | **aws-tavily MCP** | 별도 AgentCore Runtime 이 **us-east-1** 에 있음. us-west-2 VPC Endpoint 로는 **다른 리전 Runtime HTTPS** 에 도달 불가 |
-| **aws-tavily Runtime ARN 조회** | [runtime_agent/langgraph/mcp_config.py](./runtime_agent/langgraph/mcp_config.py) 가 `bedrock-agentcore-control` **us-east-1** API 호출 (`list_agent_runtimes`) |
+| **aws-tavily Runtime ARN 조회** | [runtime_agent/langgraph/mcp_config.py](./runtime_agent/langgraph/mcp_config.py) 가 `bedrock-agentcore-control` **us-west-2** API 호출 (`list_agent_runtimes`) |
 | **Web_fetch MCP** | `npx -y mcp-server-fetch-typescript` 가 **npm registry** (`registry.npmjs.org`) 접속 필요 |
 | **aws documentation MCP** | `uvx awslabs.aws-documentation-mcp-server` 가 PyPI 접속 필요 |
 | **외부 URL fetch** | web_fetch·일반 HTTP 도구가 public 인터넷 대상에 접근 |
@@ -163,7 +163,7 @@ Endpoint 는 private subnet 에 배치되며, ECS security group 과 Agent Runti
 
 **aws-tavily** ([runtime_agent/langgraph/mcp_config.py](./runtime_agent/langgraph/mcp_config.py) → `aws-tavily`):
 
-1. `bedrock-agentcore-control` us-east-1 에서 `agent_runtime_aws_tavily` Runtime ARN 조회  
+1. `bedrock-agentcore-control` us-west-2 에서 `agent_runtime_aws_tavily` Runtime ARN 조회  
 2. `https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/.../invocations` 로 MCP streamable HTTP 연결 (SigV4)
 
 **Web_fetch** (`mcp_config.py` → `web_fetch`):
@@ -1214,7 +1214,7 @@ AWS_TAVILY_RUNTIME_REGION = "us-east-1"
             "type": "streamable_http",
             "url": mcp_url,
             "auth_type": "aws_sigv4",
-            "auth_region": "us-east-1",
+            "auth_region": "us-west-2",
             "auth_service": "bedrock-agentcore",
         }
     }
@@ -1230,7 +1230,7 @@ Runtime이 없으면 MCP 서버를 건너뛰고 로그에 skip 메시지를 남�
 ```python
 if config.get("auth_type") == "aws_sigv4":
     connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
-        region=config.get("auth_region", "us-east-1"),
+        region=config.get("auth_region", "us-west-2"),
         service=config.get("auth_service", "bedrock-agentcore"),
     )
 ```
