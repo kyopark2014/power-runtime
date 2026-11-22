@@ -87,8 +87,18 @@ def wrap_tavily_mcp_tools(tools: list) -> list:
                 input = sanitize_tavily_tool_args(_name, input)
             return _orig(input, config=config, **kwargs)
 
-        tool.ainvoke = ainvoke
-        tool.invoke = invoke
+        try:
+            # Pydantic StructuredTool rejects plain attribute assignment
+            # ("object has no field ainvoke"), which previously aborted the
+            # whole Tavily MCP server load.
+            object.__setattr__(tool, "ainvoke", ainvoke)
+            object.__setattr__(tool, "invoke", invoke)
+        except Exception as e:
+            logger.warning(
+                "tavily interceptor wrap skipped for %s (%s); using unwrapped tool",
+                name,
+                e,
+            )
         wrapped.append(tool)
     return wrapped
 
