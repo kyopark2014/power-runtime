@@ -650,7 +650,7 @@ Runtime checkpoint(`checkpoints/{runtime_session_id}/`)와 **서브 경로만 �
 - ECS task role: `s3files:ClientMount`, `ClientWrite`, `GetAccessPoint`, `ListMountTargets`
 - S3 Files file system policy: Runtime role + **ECS task role**
 - ECS SG ↔ S3 Files mount SG: NFS **TCP 2049**
-- 배포: `minimumHealthyPercent=0`, `maximumPercent=100` (롤링 배포 중 DB 동시 write 방지)
+- 배포: `minimumHealthyPercent=0`, `maximumPercent=200` (구 태스크 drain 중에도 교체 기동 가능; 일시 503 완화)
 
 환경 변수 (ECS task definition에서 설정):
 
