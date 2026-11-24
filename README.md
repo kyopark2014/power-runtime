@@ -1118,6 +1118,38 @@ Human(Q2) → AI(A2) → Human(Q3) → AI(tool_calls) → ToolMessage → AI(A3)
 - trim은 LLM 컨텍스트 윈도우 관리용이며, 저장된 history를 삭제하지 않습니다.
 - CloudWatch 로그에서 `trimmed messages from X to Y (max_turns=5)`로 trim 여부를 확인할 수 있습니다.
 
+
+### Tool Result Cap
+
+턴 수 trim만으로는 **한 턴 안의 거대 `ToolMessage`**(예: `web_fetch`의 `get_raw_text`)를 막지 못합니다. MCP/builtin 도구 결과가 그대로 checkpointer와 다음 `call_model`에 쌓이면 Claude/GPT의 **~1M 컨텍스트 한도**를 넘겨 `ValidationException: prompt is too long` → UI에는 `"답변을 찾지 못하였습니다."`로만 보일 수 있습니다. (모델 업그레이드로는 해결되지 않습니다. 최신 Claude/GPT도 ≤ ~1.05M입니다.)
+
+이를 막기 위해 [[runtime_agent/langgraph/langgraph_agent.py](./runtime_agent/langgraph/langgraph_agent.py)]에서 **문자 기준 cap**을 적용합니다. 한도를 넘는 결과는 먼저 **LLM 요약**하고, 요약 실패 시에만 **hard truncate**합니다.
+
+**기본값**
+
+| 한도 | 상수 | 값 |
+|------|------|-----|
+| 도구 결과 1개 | `TOOL_RESULT_MAX_CHARS` | **32,000** chars |
+| 같은 Human 턴의 tool 결과 합 | `TOOL_RESULTS_TURN_MAX_CHARS` | **120,000** chars |
+| 요약 목표 길이 | `TOOL_RESULT_SUMMARY_TARGET_CHARS` | **8,000** chars |
+| 요약 청크 크기 | `TOOL_RESULT_SUMMARY_CHUNK_CHARS` | **60,000** chars |
+
+**삽입 위치**
+
+1. Tool 실행 직후, state/checkpointer에 넣기 **전** (`_cap_tool_node_result`).
+2. **`call_model`** — Bedrock용 메시지 정규화 후 `cap_tool_messages` 재적용.
+
+UI/SSE의 `truncate_for_stream`과 **별개**입니다.
+
+**초과 시 (우선순위)**
+
+1. **Summarize** — chunked map-reduce 요약 (`[summarized tool result: …]`)
+2. **Hard truncate (폴백)** — `…[truncated tool result: …]`
+
+단위 테스트: [TEST_[runtime_agent/langgraph/langgraph_agent.py](./runtime_agent/langgraph/langgraph_agent.py)]
+
+CloudWatch에서 `tool result summarized:` / `tool result truncated:` 로그로 확인합니다.
+
 ### Prompt Caching
 
 LangGraph tool loop마다 반복되는 **system prompt + tool schema**에 [Amazon Bedrock prompt caching](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html)을 적용합니다.
